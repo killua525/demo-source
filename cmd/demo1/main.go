@@ -267,20 +267,22 @@ func main() {
 		}
 
 		// 场景 B & C: ES 聚合（仅在 es 或 all 模式，并且通常在全量时运行）
-		if (cfg.Mode == "es" || cfg.Mode == "all") && limit == cfg.Total {
-			// 原生聚合
+		if cfg.Mode == "es" || cfg.Mode == "all" {
+			// 对于非全量情况，ES 通过排序+size 拉取前 N 条并在客户端求和以保证与 MySQL LIMIT 行为一致
 			wg.Add(1)
-			go func() {
+			go func(l int) {
 				defer wg.Done()
-				benchmarkESNativeAgg(esClient)
-			}()
-
-			// 脚本聚合
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				benchmarkESScriptAgg(esClient)
-			}()
+				if l == cfg.Total {
+					// 全量使用聚合（更高效）
+					benchmarkESNativeAgg(esClient, 0)
+					benchmarkESScriptAgg(esClient, 0)
+				} else {
+					// 部分数据使用客户端拉取并求和，确保与 MySQL 的 LIMIT + ORDER BY(create_time) 一致
+					benchmarkESNativeAgg(esClient, l)
+					// 脚本聚合在部分场景下同样使用客户端求和以保证一致性
+					benchmarkESScriptAgg(esClient, l)
+				}
+			}(limit)
 		}
 
 		// 等待本次规模的所有测试完成再进入下一个规模
@@ -521,7 +523,8 @@ func writeES(es *elastic.Client, orders []Order) {
 func benchmarkMySQL(db *sql.DB, limit int) {
 	start := time.Now()
 	// 模拟应用层拉取数据求和
-	rows, err := db.Query("SELECT amount FROM customer_orders LIMIT ?", limit)
+	// 为了与 ES 保持一致，对 LIMIT 使用确定性排序：按 create_time 升序
+	rows, err := db.Query("SELECT amount FROM customer_orders ORDER BY create_time ASC LIMIT ?", limit)
 	if err != nil {
 		log.Printf("MySQL Query Error: %v", err)
 		return
@@ -538,31 +541,57 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 }
 
 // --- 基准测试: ES 原生聚合 (Scaled Float) ---
-func benchmarkESNativeAgg(es *elastic.Client) {
+// benchmarkESNativeAgg: 如果 limit==0 则对全量使用聚合；否则拉取前 limit 条并客户端求和（按 create_time 升序）
+func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 	start := time.Now()
 	ctx := context.Background()
 
-	// Sum Aggregation: 极其高效，使用 Doc Values
-	sumAgg := elastic.NewSumAggregation().Field("amount")
+	if limit == 0 {
+		// 全量使用聚合
+		sumAgg := elastic.NewSumAggregation().Field("amount")
+		res, err := es.Search().
+			Index("customer_orders").
+			Query(elastic.NewMatchAllQuery()).
+			Size(0). // 不返回 Hits
+			Aggregation("total_amount", sumAgg).
+			Do(ctx)
 
-	res, err := es.Search().
-		Index("customer_orders").
-		Query(elastic.NewMatchAllQuery()).
-		Size(0). // 不返回 Hits
-		Aggregation("total_amount", sumAgg).
-		Do(ctx)
+		if err != nil {
+			log.Printf("ES Native Agg Error: %v", err)
+			return
+		}
 
-	if err != nil {
-		log.Printf("ES Native Agg Error: %v", err)
+		aggRes, _ := res.Aggregations.Sum("total_amount")
+		fmt.Printf("[ES    ] Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.2f (Scaled Float)\n", time.Since(start), *aggRes.Value)
 		return
 	}
 
-	aggRes, _ := res.Aggregations.Sum("total_amount")
-	fmt.Printf("[ES    ] Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.2f (Scaled Float)\n", time.Since(start), *aggRes.Value)
+	// 部分数据：排序并拉取前 limit 条，客户端求和以保持与 MySQL 一致
+	sr, err := es.Search().
+		Index("customer_orders").
+		Query(elastic.NewMatchAllQuery()).
+		Sort("create_time", true).
+		Size(limit).
+		FetchSourceContext(elastic.NewFetchSourceContext(true).Include("amount")).
+		Do(ctx)
+	if err != nil {
+		log.Printf("ES Native partial fetch error: %v", err)
+		return
+	}
+
+	var sum float64
+	for _, hit := range sr.Hits.Hits {
+		var o Order
+		if err := json.Unmarshal(hit.Source, &o); err == nil {
+			sum += o.Amount
+		}
+	}
+	fmt.Printf("[ES    ] Limit=%-8d | Type=RowFetch | Time=%-10v | Sum=%.2f (Scaled Float, client-side)\n", limit, time.Since(start), sum)
 }
 
 // --- 基准测试: ES 脚本聚合 (使用原生 JSON) ---
-func benchmarkESScriptAgg(es *elastic.Client) {
+// benchmarkESScriptAgg: 如果 limit==0 使用 scripted_metric（返回字符串），否则客户端拉取前 limit 条并求和
+func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 	start := time.Now()
 	ctx := context.Background()
 
@@ -593,47 +622,70 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 		},
 	}
 
-	// 执行搜索请求
-	searchResult, err := es.Search().
+	if limit == 0 {
+		// 全量脚本聚合
+		searchResult, err := es.Search().
+			Index("customer_orders").
+			Query(elastic.NewMatchAllQuery()).
+			Size(0).
+			Source(query).
+			Do(ctx)
+
+		if err != nil {
+			log.Printf("ES Script Agg Error: %v", err)
+			return
+		}
+
+		// 提取聚合结果
+		if searchResult.Aggregations == nil {
+			log.Printf("ES Script Agg Error: no aggregations in response")
+			return
+		}
+
+		// 从原始 JSON 数据中获取 bd_sum 结果（处理多种可能的返回类型）
+		var resultValue interface{} = "N/A"
+		if rawMsg, found := searchResult.Aggregations["bd_sum"]; found {
+			// 打印原始响应以便调试异常情况
+			var aggResult map[string]interface{}
+			if err := json.Unmarshal(rawMsg, &aggResult); err != nil {
+				log.Printf("ES Script Agg: failed to unmarshal aggregation raw json: %v", err)
+				resultValue = string(rawMsg)
+			} else {
+				if val, ok := aggResult["value"]; ok {
+					resultValue = val
+				} else if doc, ok := aggResult["bd_sum"]; ok {
+					resultValue = doc
+				} else {
+					resultValue = aggResult
+				}
+			}
+		} else {
+			log.Printf("ES Script Agg Error: bd_sum not found in aggregations")
+		}
+
+		fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal String)\n", time.Since(start), resultValue)
+		return
+	}
+
+	// 部分数据：客户端拉取前 limit 条并求和（按 create_time 升序）以与 MySQL LIMIT 行为一致
+	sr, err := es.Search().
 		Index("customer_orders").
 		Query(elastic.NewMatchAllQuery()).
-		Size(0).
-		Source(query).
+		Sort("create_time", true).
+		Size(limit).
+		FetchSourceContext(elastic.NewFetchSourceContext(true).Include("amount")).
 		Do(ctx)
-
 	if err != nil {
-		log.Printf("ES Script Agg Error: %v", err)
+		log.Printf("ES Script partial fetch error: %v", err)
 		return
 	}
 
-	// 提取聚合结果
-	if searchResult.Aggregations == nil {
-		log.Printf("ES Script Agg Error: no aggregations in response")
-		return
-	}
-
-	// 从原始 JSON 数据中获取 bd_sum 结果（处理多种可能的返回类型）
-	var resultValue interface{} = "N/A"
-	if rawMsg, found := searchResult.Aggregations["bd_sum"]; found {
-		// 打印原始响应以便调试异常情况
-		var aggResult map[string]interface{}
-		if err := json.Unmarshal(rawMsg, &aggResult); err != nil {
-			log.Printf("ES Script Agg: failed to unmarshal aggregation raw json: %v", err)
-			resultValue = string(rawMsg)
-		} else {
-			// 常见情况：脚本返回字符串形式的数值（我们在 reduce 中返回了字符串）
-			if val, ok := aggResult["value"]; ok {
-				resultValue = val
-			} else if doc, ok := aggResult["bd_sum"]; ok {
-				resultValue = doc
-			} else {
-				// 保险回退：打印整个聚合结构
-				resultValue = aggResult
-			}
+	var sum float64
+	for _, hit := range sr.Hits.Hits {
+		var o Order
+		if err := json.Unmarshal(hit.Source, &o); err == nil {
+			sum += o.Amount
 		}
-	} else {
-		log.Printf("ES Script Agg Error: bd_sum not found in aggregations")
 	}
-
-	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal String)\n", time.Since(start), resultValue)
+	fmt.Printf("[ES    ] Limit=%-8d | Type=ScriptFetch | Time=%-10v | Sum=%.2f (client-side)\n", limit, time.Since(start), sum)
 }
