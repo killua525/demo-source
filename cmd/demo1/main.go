@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -80,7 +79,7 @@ func init() {
 	esFlag := flag.String("es", "", "ES地址")
 	esuserFlag := flag.String("esuser", "", "ES用户名（可选）")
 	espassFlag := flag.String("espass", "", "ES密码（可选）")
-	modeFlag := flag.String("mode", "", "运行模式: all(默认), mysql, es")
+	modeFlag := flag.String("mode", "all", "运行模式: all(默认), mysql, es")
 	totalFlag := flag.Int("total", 0, "总数据量")
 	batchFlag := flag.Int("batch", 0, "批量插入的大小")
 	reloadFlag := flag.Bool("reload", false, "是否强制重新加载数据")
@@ -115,9 +114,7 @@ func init() {
 	if *espassFlag != "" {
 		cfg.ESPassword = *espassFlag
 	}
-	if *modeFlag != "" {
-		cfg.Mode = *modeFlag
-	}
+	cfg.Mode = *modeFlag // 命令行参数优先级最高
 	if *totalFlag != 0 {
 		cfg.Total = *totalFlag
 	}
@@ -149,7 +146,7 @@ func printVersion() {
 
 // 从配置文件加载配置
 func loadConfigFile(filePath string) {
-	data, err := ioutil.ReadFile(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Fatalf("Failed to read config file: %v", err)
 	}
@@ -305,69 +302,71 @@ func main() {
 // --- 初始化逻辑 ---
 func dataExists(db *sql.DB, es *elastic.Client) bool {
 	ctx := context.Background()
-	hasData := true
+	mysqlHasData, esHasData := false, false
 
 	// 检查 MySQL 数据是否存在
-	if cfg.Mode == "mysql" || cfg.Mode == "all" {
-		if db != nil {
-			// 先检查表是否存在（通过 information_schema）
-			var tableExists int
-			err := db.QueryRow(`
+	if db != nil {
+		// 先检查表是否存在（通过 information_schema）
+		var tableExists int
+		err := db.QueryRow(`
 				SELECT COUNT(*) FROM information_schema.TABLES 
 				WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'customer_orders'
 			`).Scan(&tableExists)
 
+		if err != nil {
+			fmt.Printf(">>> [检查数据] MySQL 检查表出错: %v\n", err)
+		} else if tableExists == 0 {
+			fmt.Println(">>> [检查数据] MySQL 表 customer_orders 不存在")
+		} else {
+			// 表存在，再检查数据量
+			var count int
+			err := db.QueryRow("SELECT COUNT(*) FROM customer_orders").Scan(&count)
 			if err != nil {
-				fmt.Printf(">>> [检查数据] MySQL 检查表出错: %v\n", err)
-				hasData = false
-			} else if tableExists == 0 {
-				fmt.Println(">>> [检查数据] MySQL 表 customer_orders 不存在")
-				hasData = false
+				fmt.Printf(">>> [检查数据] MySQL 统计数据出错: %v\n", err)
+			} else if count == 0 {
+				fmt.Println(">>> [检查数据] MySQL 表 customer_orders 存在，但数据为空")
 			} else {
-				// 表存在，再检查数据量
-				var count int
-				err := db.QueryRow("SELECT COUNT(*) FROM customer_orders").Scan(&count)
-				if err != nil {
-					fmt.Printf(">>> [检查数据] MySQL 统计数据出错: %v\n", err)
-					hasData = false
-				} else if count == 0 {
-					fmt.Println(">>> [检查数据] MySQL 表 customer_orders 存在，但数据为空")
-					hasData = false
-				} else {
-					fmt.Printf(">>> [检查数据] MySQL 表 customer_orders 已存在，当前数据量: %d 条\n", count)
-				}
+				fmt.Printf(">>> [检查数据] MySQL 表 customer_orders 已存在，当前数据量: %d 条\n", count)
+				mysqlHasData = true
 			}
 		}
 	}
 
 	// 检查 ES 数据是否存在
-	if cfg.Mode == "es" || cfg.Mode == "all" {
-		if es != nil {
-			// 先检查索引是否存在
-			exists, err := es.IndexExists("customer_orders").Do(ctx)
+	if es != nil {
+		// 先检查索引是否存在
+		exists, err := es.IndexExists("customer_orders").Do(ctx)
+		if err != nil {
+			fmt.Printf(">>> [检查数据] Elasticsearch 检查索引出错: %v\n", err)
+		} else if !exists {
+			fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 不存在")
+		} else {
+			// 索引存在，再检查数据量
+			count, err := es.Count("customer_orders").Do(ctx)
 			if err != nil {
-				fmt.Printf(">>> [检查数据] Elasticsearch 检查索引出错: %v\n", err)
-				hasData = false
-			} else if !exists {
-				fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 不存在")
-				hasData = false
+				fmt.Printf(">>> [检查数据] Elasticsearch 统计数据出错: %v\n", err)
+			} else if count == 0 {
+				fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 存在，但数据为空")
 			} else {
-				// 索引存在，再检查数据量
-				count, err := es.Count("customer_orders").Do(ctx)
-				if err != nil {
-					fmt.Printf(">>> [检查数据] Elasticsearch 统计数据出错: %v\n", err)
-					hasData = false
-				} else if count == 0 {
-					fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 存在，但数据为空")
-					hasData = false
-				} else {
-					fmt.Printf(">>> [检查数据] Elasticsearch 索引 customer_orders 已存在，当前数据量: %d 条\n", count)
-				}
+				fmt.Printf(">>> [检查数据] Elasticsearch 索引 customer_orders 已存在，当前数据量: %d 条\n", count)
+				esHasData = true
 			}
 		}
 	}
 
-	return hasData
+	// 根据运行模式决定最终的数据存在状态
+	switch cfg.Mode {
+	case "mysql":
+		return mysqlHasData
+	case "es":
+		return esHasData
+	case "all":
+		// 在 all 模式下，必须两者都有数据才算存在
+		return mysqlHasData && esHasData
+	default:
+		// 理论上不会到这里，因为 mode 有默认值 'all'
+		return false
+	}
 }
 
 // --- 初始化逻辑 ---
@@ -381,12 +380,24 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 				customer_id VARCHAR(64),
 				amount DECIMAL(10, 2),
 				create_time DATETIME,
+				KEY idx_create_time (create_time),
 				KEY idx_amt (amount)
 			)`)
 			if err != nil {
-				log.Fatalf("MySQL init table failed: %v", err)
+				log.Fatalf("MySQL create table failed: %v", err)
 			}
-			fmt.Println(">>> MySQL 表初始化完成（如果表已存在则保留现有数据）")
+
+			// 如果是 reload 模式，清空表数据以保证与 ES 行为一致
+			if cfg.Reload {
+				fmt.Println(">>> MySQL: 由于启用了 reload 参数，将清空表 customer_orders")
+				_, err := db.Exec(`TRUNCATE TABLE customer_orders`)
+				if err != nil {
+					log.Fatalf("MySQL truncate table failed: %v", err)
+				}
+				fmt.Println(">>> MySQL 表初始化完成（已清空并准备重新加载）")
+			} else {
+				fmt.Println(">>> MySQL 表初始化完成（如果表已存在则保留现有数据）")
+			}
 		}
 	}
 
@@ -542,7 +553,11 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 		err = db.QueryRow("SELECT SUM(amount) FROM customer_orders").Scan(&sum)
 	} else {
 		// 部分数据：使用 ORDER BY 和 LIMIT，然后对结果求和
-		err = db.QueryRow("SELECT SUM(amount) FROM customer_orders ORDER BY create_time ASC LIMIT ?", limit).Scan(&sum)
+		// 标准SQL应该使用子查询来确保先排序和限制，再聚合，以保证逻辑正确性
+		err = db.QueryRow(`
+			SELECT SUM(amount) FROM
+			(SELECT amount FROM customer_orders ORDER BY create_time ASC LIMIT ?) AS subquery
+		`, limit).Scan(&sum)
 	}
 
 	if err != nil {
