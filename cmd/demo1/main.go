@@ -187,38 +187,40 @@ func main() {
 	fmt.Printf(">>> 数据加载完成，耗时: %v\n\n", time.Since(start))
 
 	// 5. 开始基准测试
-	// 仅在 all 模式下进行性能测试
-	if cfg.Mode == "all" {
-		// 测试不同数据规模下的性能
-		queryLevels := []int{10000, 100000}
-		if cfg.Total >= 1000000 {
-			queryLevels = append(queryLevels, 1000000)
-		}
-		// 如果总数够大，最后测试全量
-		if cfg.Total > 1000000 {
-			queryLevels = append(queryLevels, cfg.Total)
-		}
+	// 5. 开始基准测试
+	// 测试不同数据规模下的性能
+	queryLevels := []int{10000, 100000}
+	if cfg.Total >= 1000000 {
+		queryLevels = append(queryLevels, 1000000)
+	}
+	// 如果总数够大，最后测试全量
+	if cfg.Total > 1000000 {
+		queryLevels = append(queryLevels, cfg.Total)
+	}
 
-		fmt.Println(">>> [Phase 2] 开始查询性能测试...")
-		for _, limit := range queryLevels {
-			fmt.Printf("\n--- 测试数据规模: %d ---\n", limit)
+	fmt.Println(">>> [Phase 2] 开始查询性能测试...")
+	for _, limit := range queryLevels {
+		fmt.Printf("\n--- 测试数据规模: %d ---\n", limit)
 
-			// 场景 A: MySQL 查询 + 应用层求和
+		// 场景 A: MySQL 查询 + 应用层求和（在 mysql 或 all 模式下运行）
+		if cfg.Mode == "mysql" || cfg.Mode == "all" {
 			benchmarkMySQL(db, limit)
+		}
 
-			// 场景 B: ES 原生聚合 (Scaled Float) - 推荐
-			// 注意：聚合通常针对全量或Query过滤后的数据，这里我们用 MatchAll 模拟全量
+		// 场景 B: ES 原生聚合 (Scaled Float)（在 es 或 all 模式下运行）
+		// 注意：聚合通常针对全量或Query过滤后的数据，这里我们用 MatchAll 模拟全量
+		if cfg.Mode == "es" || cfg.Mode == "all" {
 			if limit == cfg.Total {
 				benchmarkESNativeAgg(esClient)
 			}
+		}
 
-			// 场景 C: ES 脚本聚合 (BigDecimal) - 特殊需求
+		// 场景 C: ES 脚本聚合 (BigDecimal)（在 es 或 all 模式下运行）
+		if cfg.Mode == "es" || cfg.Mode == "all" {
 			if limit == cfg.Total {
 				benchmarkESScriptAgg(esClient)
 			}
 		}
-	} else {
-		fmt.Printf(">>> 运行模式: %s (仅加载数据，跳过性能测试)\n", cfg.Mode)
 	}
 }
 
