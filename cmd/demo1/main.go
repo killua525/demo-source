@@ -49,6 +49,7 @@ type Config struct {
 	Total      int
 	Batch      int
 	Mode       string // all(默认), mysql, es
+	Reload     bool   // 是否重新加载数据（默认false：若数据存在则不加载）
 }
 
 // --- 实体对象 ---
@@ -78,6 +79,7 @@ func init() {
 	modeFlag := flag.String("mode", "", "运行模式: all(默认), mysql, es")
 	totalFlag := flag.Int("total", 0, "总数据量")
 	batchFlag := flag.Int("batch", 0, "批量插入的大小")
+	reloadFlag := flag.Bool("reload", false, "是否强制重新加载数据")
 	flag.Parse()
 
 	// 如果请求显示版本信息
@@ -116,6 +118,9 @@ func init() {
 	}
 	if *batchFlag != 0 {
 		cfg.Batch = *batchFlag
+	}
+	if *reloadFlag {
+		cfg.Reload = *reloadFlag
 	}
 }
 
@@ -203,11 +208,17 @@ func main() {
 	// 3. 初始化 Schema (表结构 + 索引配置)
 	initSchema(db, esClient)
 
-	// 4. 数据加载 (Producer-Consumer 模型)
-	fmt.Printf(">>> [Phase 1] 开始加载 %d 条数据...\n", cfg.Total)
-	start := time.Now()
-	loadData(db, esClient)
-	fmt.Printf(">>> 数据加载完成，耗时: %v\n\n", time.Since(start))
+	// 4. 检查数据是否已存在，如果不需要 reload 则跳过加载
+	shouldLoadData := cfg.Reload || !dataExists(db, esClient)
+	if shouldLoadData {
+		// 数据加载 (Producer-Consumer 模型)
+		fmt.Printf(">>> [Phase 1] 开始加载 %d 条数据...\n", cfg.Total)
+		start := time.Now()
+		loadData(db, esClient)
+		fmt.Printf(">>> 数据加载完成，耗时: %v\n\n", time.Since(start))
+	} else {
+		fmt.Println(">>> [Phase 1] 数据已存在，跳过数据加载（若需重新加载，请使用 -reload 参数）\n")
+	}
 
 	// 5. 开始基准测试
 	// 5. 开始基准测试
@@ -245,6 +256,34 @@ func main() {
 			}
 		}
 	}
+}
+
+// --- 初始化逻辑 ---
+func dataExists(db *sql.DB, es *elastic.Client) bool {
+	ctx := context.Background()
+
+	// 检查 MySQL 数据是否存在
+	if cfg.Mode == "mysql" || cfg.Mode == "all" {
+		if db != nil {
+			var count int
+			err := db.QueryRow("SELECT COUNT(*) FROM customer_orders LIMIT 1").Scan(&count)
+			if err != nil || count == 0 {
+				return false
+			}
+		}
+	}
+
+	// 检查 ES 数据是否存在
+	if cfg.Mode == "es" || cfg.Mode == "all" {
+		if es != nil {
+			count, err := es.Count("customer_orders").Do(ctx)
+			if err != nil || count == 0 {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // --- 初始化逻辑 ---
