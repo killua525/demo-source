@@ -18,7 +18,12 @@ import (
 	"github.com/olivere/elastic/v7"
 	"gopkg.in/yaml.v2"
 )
-
+// 版本信息，通过编译时 ldflags 注入
+var (
+	Version   = "dev"
+	CommitID  = "unknown"
+	BuildTime = "unknown"
+)
 // --- 配置文件结构 ---
 type ConfigFile struct {
 	MySQL struct {
@@ -63,6 +68,7 @@ func init() {
 	cfg.Batch = 2000
 
 	// 命令行参数解析
+	showVersion := flag.Bool("version", false, "显示版本信息")
 	configFile := flag.String("config", "", "配置文件路径 (config.yaml)")
 	flag.StringVar(&cfg.MySQLDSN, "mysql", cfg.MySQLDSN, "MySQL连接串")
 	flag.StringVar(&cfg.ESUrl, "es", cfg.ESUrl, "ES地址")
@@ -72,6 +78,12 @@ func init() {
 	flag.IntVar(&cfg.Batch, "batch", cfg.Batch, "批量插入的大小")
 	flag.Parse()
 
+	// 如果请求显示版本信息
+	if *showVersion {
+		printVersion()
+		os.Exit(0)
+	}
+
 	// 如果指定了配置文件，则从配置文件读取
 	if *configFile != "" {
 		loadConfigFile(*configFile)
@@ -80,6 +92,14 @@ func init() {
 		loadConfigFile("config.yaml")
 	}
 	// 命令行参数优先级更高，如果在命令行指定了非默认值，则覆盖配置文件的值
+}
+
+// 打印版本信息
+func printVersion() {
+	fmt.Printf("demo1 - MySQL & Elasticsearch 性能对标测试工具\n")
+	fmt.Printf("Version: %s\n", Version)
+	fmt.Printf("Commit:  %s\n", CommitID)
+	fmt.Printf("Built:   %s\n", BuildTime)
 }
 
 // 从配置文件加载配置
