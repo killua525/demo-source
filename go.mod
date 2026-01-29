@@ -1,4 +1,4 @@
-module github.com/killua525/demo1
+module github.com/killua525/demo-source
 
 go 1.21.0
 
