@@ -261,14 +261,18 @@ func main() {
 // --- 初始化逻辑 ---
 func dataExists(db *sql.DB, es *elastic.Client) bool {
 	ctx := context.Background()
+	hasData := true
 
 	// 检查 MySQL 数据是否存在
 	if cfg.Mode == "mysql" || cfg.Mode == "all" {
 		if db != nil {
 			var count int
-			err := db.QueryRow("SELECT COUNT(*) FROM customer_orders LIMIT 1").Scan(&count)
+			err := db.QueryRow("SELECT COUNT(*) FROM customer_orders").Scan(&count)
 			if err != nil || count == 0 {
-				return false
+				fmt.Println(">>> [检查数据] MySQL 表 customer_orders 不存在或为空")
+				hasData = false
+			} else {
+				fmt.Printf(">>> [检查数据] MySQL 表 customer_orders 已存在，当前数据量: %d 条\n", count)
 			}
 		}
 	}
@@ -278,12 +282,15 @@ func dataExists(db *sql.DB, es *elastic.Client) bool {
 		if es != nil {
 			count, err := es.Count("customer_orders").Do(ctx)
 			if err != nil || count == 0 {
-				return false
+				fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 不存在或为空")
+				hasData = false
+			} else {
+				fmt.Printf(">>> [检查数据] Elasticsearch 索引 customer_orders 已存在，当前数据量: %d 条\n", count)
 			}
 		}
 	}
 
-	return true
+	return hasData
 }
 
 // --- 初始化逻辑 ---
