@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -98,11 +99,9 @@ func main() {
 		}
 
 		// 场景 C: ES 脚本聚合 (BigDecimal) - 特殊需求
-		// 注意: 这个功能需要 ES 支持 script_metric aggregation
-		// 如果编译失败可以注释掉
-		// if limit == cfg.Total {
-		// 	benchmarkESScriptAgg(esClient)
-		// }
+		if limit == cfg.Total {
+			benchmarkESScriptAgg(esClient)
+		}
 	}
 }
 
@@ -267,37 +266,31 @@ func benchmarkESNativeAgg(es *elastic.Client) {
 	fmt.Printf("[ES    ] Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.2f (Scaled Float)\n", time.Since(start), *aggRes.Value)
 }
 
-// --- 基准测试: ES 脚本聚合 (BigDecimal) - 暂时禁用 ---
-/*
+// --- 基准测试: ES 脚本聚合 (使用原生 JSON) ---
 func benchmarkESScriptAgg(es *elastic.Client) {
 	start := time.Now()
 	ctx := context.Background()
 
-	// Painless Script for BigDecimal
-	// Init: 初始化状态
-	initScript := elastic.NewScript("state.total = BigDecimal.ZERO")
-	// Map: 遍历文档 (doc['amount'].value 取出的是已经除以因子后的浮点值)
-	mapScript := elastic.NewScript("state.total = state.total.add(BigDecimal.valueOf(doc['amount'].value))")
-	// Combine: 分片内汇总
-	combineScript := elastic.NewScript("return state.total")
-	// Reduce: 跨分片汇总
-	reduceScript := elastic.NewScript(`
-		BigDecimal sum = BigDecimal.ZERO; 
-		for (s in states) { if (s != null) { sum = sum.add(s); } } 
-		return sum
-	`)
+	// 使用原生 JSON 定义脚本聚合（ES7 兼容）
+	query := map[string]interface{}{
+		"aggs": map[string]interface{}{
+			"bd_sum": map[string]interface{}{
+				"script_metric": map[string]interface{}{
+					"init_script":     "state.total = 0",
+					"map_script":      "state.total += doc['amount'].value",
+					"combine_script":  "return state.total",
+					"reduce_script":   "double sum = 0; for (t in states) { sum += t } return sum",
+				},
+			},
+		},
+	}
 
-	scriptAgg := elastic.NewScriptMetricAggregation().
-		InitScript(initScript).
-		MapScript(mapScript).
-		CombineScript(combineScript).
-		ReduceScript(reduceScript.String())
-
-	res, err := es.Search().
+	// 执行搜索请求
+	searchResult, err := es.Search().
 		Index("customer_orders").
 		Query(elastic.NewMatchAllQuery()).
 		Size(0).
-		Aggregation("bd_sum", scriptAgg).
+		Source(query).
 		Do(ctx)
 
 	if err != nil {
@@ -305,8 +298,22 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 		return
 	}
 
-	aggRes, _ := res.Aggregations.ScriptMetric("bd_sum")
-	// 注意：script metric 返回的 Value 是 interface{}，通常打印出来看即可
-	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal)\n", time.Since(start), aggRes.Value)
+	// 提取聚合结果
+	if searchResult.Aggregations == nil {
+		log.Printf("ES Script Agg Error: no aggregations in response")
+		return
+	}
+
+	// 从原始 JSON 数据中获取 bd_sum 结果
+	var resultValue interface{} = "N/A"
+	if rawMsg, found := searchResult.Aggregations["bd_sum"]; found {
+		var aggResult map[string]interface{}
+		if err := json.Unmarshal(rawMsg, &aggResult); err == nil {
+			if val, ok := aggResult["value"]; ok {
+				resultValue = val
+			}
+		}
+	}
+
+	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v\n", time.Since(start), resultValue)
 }
-*/
