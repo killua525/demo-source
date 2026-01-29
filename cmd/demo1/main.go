@@ -271,15 +271,31 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 	start := time.Now()
 	ctx := context.Background()
 
-	// 使用原生 JSON 定义脚本聚合（ES7 兼容）
+	// 使用 BigDecimal 确保精度不丢失（ES7 兼容的 Painless 脚本）
 	query := map[string]interface{}{
 		"aggs": map[string]interface{}{
 			"bd_sum": map[string]interface{}{
 				"script_metric": map[string]interface{}{
-					"init_script":     "state.total = 0",
-					"map_script":      "state.total += doc['amount'].value",
-					"combine_script":  "return state.total",
-					"reduce_script":   "double sum = 0; for (t in states) { sum += t } return sum",
+					// 初始化为 BigDecimal.ZERO
+					"init_script": "state.total = new BigDecimal('0')",
+					// 将每个值转换为 BigDecimal 并累加（保证精度）
+					"map_script": "state.total = state.total.add(new BigDecimal(String.valueOf(doc['amount'].value)))",
+					// 分片内返回 BigDecimal
+					"combine_script": "return state.total",
+					// 跨分片汇总，确保所有分片结果都用 BigDecimal 处理
+					"reduce_script": `
+						BigDecimal sum = new BigDecimal('0');
+						for (t in states) {
+							if (t != null) {
+								if (t instanceof BigDecimal) {
+									sum = sum.add(t);
+								} else {
+									sum = sum.add(new BigDecimal(String.valueOf(t)));
+								}
+							}
+						}
+						return sum;
+					`,
 				},
 			},
 		},
@@ -315,5 +331,5 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 		}
 	}
 
-	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v\n", time.Since(start), resultValue)
+	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal)\n", time.Since(start), resultValue)
 }
