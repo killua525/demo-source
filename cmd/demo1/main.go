@@ -255,6 +255,22 @@ func main() {
 	for _, limit := range queryLevels {
 		fmt.Printf("\n--- 测试数据规模: %d ---\n", limit)
 
+		// 列出本次要执行的场景，便于区分输出
+		scenarios := []string{}
+		if cfg.Mode == "mysql" || cfg.Mode == "all" {
+			scenarios = append(scenarios, "A: MySQL RowScan (ORDER BY create_time LIMIT n)")
+		}
+		if cfg.Mode == "es" || cfg.Mode == "all" {
+			if limit == cfg.Total {
+				scenarios = append(scenarios, "B: ES Native Agg (full)")
+				scenarios = append(scenarios, "C: ES Scripted Agg (full)")
+			} else {
+				scenarios = append(scenarios, "B: ES RowFetch (top N by create_time)")
+				scenarios = append(scenarios, "C: ES ScriptFetch (top N by create_time)")
+			}
+		}
+		fmt.Printf(">>> 执行场景: %s\n", strings.Join(scenarios, " | "))
+
 		var wg sync.WaitGroup
 
 		// 场景 A: MySQL 查询 + 应用层求和（在 mysql 或 all 模式下运行）
@@ -266,20 +282,16 @@ func main() {
 			}(limit)
 		}
 
-		// 场景 B & C: ES 聚合（仅在 es 或 all 模式，并且通常在全量时运行）
+		// 场景 B & C: ES 聚合/拉取（取决于是否为全量）
 		if cfg.Mode == "es" || cfg.Mode == "all" {
-			// 对于非全量情况，ES 通过排序+size 拉取前 N 条并在客户端求和以保证与 MySQL LIMIT 行为一致
 			wg.Add(1)
 			go func(l int) {
 				defer wg.Done()
 				if l == cfg.Total {
-					// 全量使用聚合（更高效）
 					benchmarkESNativeAgg(esClient, 0)
 					benchmarkESScriptAgg(esClient, 0)
 				} else {
-					// 部分数据使用客户端拉取并求和，确保与 MySQL 的 LIMIT + ORDER BY(create_time) 一致
 					benchmarkESNativeAgg(esClient, l)
-					// 脚本聚合在部分场景下同样使用客户端求和以保证一致性
 					benchmarkESScriptAgg(esClient, l)
 				}
 			}(limit)
@@ -537,7 +549,7 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 		rows.Scan(&amount)
 		sum += amount
 	}
-	fmt.Printf("[MySQL ] Limit=%-8d | Type=RowScan | Time=%-10v | Sum=%.2f\n", limit, time.Since(start), sum)
+	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8d | Type=RowScan | Time=%-10v | Sum=%.2f\n", limit, time.Since(start), sum)
 }
 
 // --- 基准测试: ES 原生聚合 (Scaled Float) ---
@@ -562,7 +574,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 		}
 
 		aggRes, _ := res.Aggregations.Sum("total_amount")
-		fmt.Printf("[ES    ] Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.2f (Scaled Float)\n", time.Since(start), *aggRes.Value)
+		fmt.Printf("[ES    ] Scenario=B | Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.2f (Scaled Float)\n", time.Since(start), *aggRes.Value)
 		return
 	}
 
@@ -586,7 +598,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 			sum += o.Amount
 		}
 	}
-	fmt.Printf("[ES    ] Limit=%-8d | Type=RowFetch | Time=%-10v | Sum=%.2f (Scaled Float, client-side)\n", limit, time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=B | Limit=%-8d | Type=RowFetch | Time=%-10v | Sum=%.2f (Scaled Float, client-side)\n", limit, time.Since(start), sum)
 }
 
 // --- 基准测试: ES 脚本聚合 (使用原生 JSON) ---
@@ -663,7 +675,7 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 			log.Printf("ES Script Agg Error: bd_sum not found in aggregations")
 		}
 
-		fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal String)\n", time.Since(start), resultValue)
+		fmt.Printf("[ES    ] Scenario=C | Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal String)\n", time.Since(start), resultValue)
 		return
 	}
 
@@ -687,5 +699,5 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 			sum += o.Amount
 		}
 	}
-	fmt.Printf("[ES    ] Limit=%-8d | Type=ScriptFetch | Time=%-10v | Sum=%.2f (client-side)\n", limit, time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=C | Limit=%-8d | Type=ScriptFetch | Time=%-10v | Sum=%.2f (client-side)\n", limit, time.Since(start), sum)
 }
