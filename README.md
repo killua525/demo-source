@@ -93,18 +93,56 @@ demo1 -config /path/to/config.yaml
 ```yaml
 # MySQL 配置
 mysql:
+  # 基本配置
   dsn: "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+  
+  # 密码包含特殊字符时的配置方式
+  # 注意：需要用单引号或双引号括起整个连接字符串
+  # 密码中包含 @ 符号的示例
+  # dsn: 'root:pass@word@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True'
+  
+  # 密码中包含 : 冒号的示例
+  # dsn: "root:pass:word@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
 
 # Elasticsearch 配置
 elasticsearch:
   url: "http://127.0.0.1:9200"
-  username: "elastic"  # 可选，若为空则不使用认证
-  password: "password" # 可选，若为空则不使用认证
+  username: "elastic"          # 可选，若为空则不使用认证
+  password: "your_password"    # 可选，若为空则不使用认证
+  
+  # 密码中包含特殊字符的示例
+  # password: "p@ss!123#456"
 
 # 数据处理配置
 data:
   total: 200000    # 总数据量
   batch: 2000      # 批量插入大小
+```
+
+#### 配置文件中的特殊字符处理
+
+**问题**：MySQL DSN 中包含 `@` 符号等特殊字符时如何配置？
+
+**解决方案**：在 YAML 配置文件中，用引号括起包含特殊字符的字符串：
+
+| 场景 | 示例 | 说明 |
+|------|------|------|
+| 密码含 `@` | `'user:p@ss@tcp(host:3306)/db'` | 用单引号括起 |
+| 密码含 `:` | `"user:pass:word@tcp(host:3306)/db"` | 用双引号括起 |
+| 密码含多个特殊字符 | `"user:p@ss:w0rd!@tcp(host:3306)/db"` | 用引号括起整个 DSN |
+| 空格或其他字符 | `'user:pass word@tcp(host:3306)/db'` | 用引号括起 |
+
+**示例**：
+```yaml
+mysql:
+  # ❌ 错误（特殊字符未转义）
+  # dsn: root:p@ssword@tcp(127.0.0.1:3306)/test_db
+  
+  # ✓ 正确（用单引号括起）
+  dsn: 'root:p@ssword@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True'
+  
+  # ✓ 也正确（用双引号括起）
+  # dsn: "root:p@ssword@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
 ```
 
 ### 配置参数优先级

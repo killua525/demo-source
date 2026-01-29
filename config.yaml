@@ -3,13 +3,30 @@
 
 # MySQL 配置
 mysql:
+  # MySQL DSN 格式: username:password@tcp(host:port)/database?charset=utf8mb4&parseTime=True
+  # 注意：如果密码中包含特殊字符（如 @、:、# 等），需要用单引号或双引号括起来
   dsn: "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+  
+  # 密码包含 @ 符号的示例（用单引号或双引号括起整个 DSN）
+  # dsn: 'root:pass@word@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True'
+  # 或
+  # dsn: "user:p@ss@word@tcp(localhost:3306)/mydb?charset=utf8mb4&parseTime=True"
+  
+  # 密码包含冒号的示例
+  # dsn: "root:pass:word@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+  
+  # 密码包含其他特殊字符的示例
+  # dsn: "user:p@ss!123#456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
 
 # Elasticsearch 配置
 elasticsearch:
   url: "http://127.0.0.1:9200"
   username: ""  # 可选，若为空则不使用认证
   password: ""  # 可选，若为空则不使用认证
+  
+  # 如果密码中包含特殊字符，也需要用引号括起来
+  # username: "elastic"
+  # password: "p@ss!123#456"
 
 # 数据处理配置
 data:
