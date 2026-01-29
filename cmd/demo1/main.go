@@ -572,26 +572,22 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 		"aggs": map[string]interface{}{
 			"bd_sum": map[string]interface{}{
 				"scripted_metric": map[string]interface{}{
-					// 初始化为 BigDecimal.ZERO
-					"init_script": "state.total = new BigDecimal('0')",
+					// 初始化为 BigDecimal.ZERO（使用完全限定类名以确保 Painless 能识别）
+					"init_script": "state.total = new java.math.BigDecimal('0')",
 					// 将每个值转换为 BigDecimal 并累加（保证精度）
-					"map_script": "state.total = state.total.add(new BigDecimal(String.valueOf(doc['amount'].value)))",
-					// 分片内返回 BigDecimal
-					"combine_script": "return state.total",
-					// 跨分片汇总，确保所有分片结果都用 BigDecimal 处理
+					"map_script": "state.total = state.total.add(new java.math.BigDecimal(String.valueOf(doc['amount'].value)))",
+					// 分片内返回字符串形式的 BigDecimal（避免序列化为复杂对象）
+					"combine_script": "return state.total.toPlainString();",
+					// 跨分片汇总，接收每个分片的字符串表示并用 BigDecimal 累加，最后返回字符串
 					"reduce_script": `
-						BigDecimal sum = new BigDecimal('0');
-						for (t in states) {
-							if (t != null) {
-								if (t instanceof BigDecimal) {
-									sum = sum.add(t);
-								} else {
-									sum = sum.add(new BigDecimal(String.valueOf(t)));
+							java.math.BigDecimal sum = new java.math.BigDecimal('0');
+							for (t in states) {
+								if (t != null) {
+									sum = sum.add(new java.math.BigDecimal(String.valueOf(t)));
 								}
 							}
-						}
-						return sum;
-					`,
+							return sum.toPlainString();
+						`,
 				},
 			},
 		},
@@ -616,16 +612,28 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 		return
 	}
 
-	// 从原始 JSON 数据中获取 bd_sum 结果
+	// 从原始 JSON 数据中获取 bd_sum 结果（处理多种可能的返回类型）
 	var resultValue interface{} = "N/A"
 	if rawMsg, found := searchResult.Aggregations["bd_sum"]; found {
+		// 打印原始响应以便调试异常情况
 		var aggResult map[string]interface{}
-		if err := json.Unmarshal(rawMsg, &aggResult); err == nil {
+		if err := json.Unmarshal(rawMsg, &aggResult); err != nil {
+			log.Printf("ES Script Agg: failed to unmarshal aggregation raw json: %v", err)
+			resultValue = string(rawMsg)
+		} else {
+			// 常见情况：脚本返回字符串形式的数值（我们在 reduce 中返回了字符串）
 			if val, ok := aggResult["value"]; ok {
 				resultValue = val
+			} else if doc, ok := aggResult["bd_sum"]; ok {
+				resultValue = doc
+			} else {
+				// 保险回退：打印整个聚合结构
+				resultValue = aggResult
 			}
 		}
+	} else {
+		log.Printf("ES Script Agg Error: bd_sum not found in aggregations")
 	}
 
-	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal)\n", time.Since(start), resultValue)
+	fmt.Printf("[ES    ] Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal String)\n", time.Since(start), resultValue)
 }
