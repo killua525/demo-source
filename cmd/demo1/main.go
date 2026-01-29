@@ -435,10 +435,11 @@ func benchmarkESScriptAgg(es *elastic.Client) {
 	ctx := context.Background()
 
 	// 使用 BigDecimal 确保精度不丢失（ES7 兼容的 Painless 脚本）
+	// 注意：Elasticsearch 中脚本聚合的正确类型是 scripted_metric
 	query := map[string]interface{}{
 		"aggs": map[string]interface{}{
 			"bd_sum": map[string]interface{}{
-				"script_metric": map[string]interface{}{
+				"scripted_metric": map[string]interface{}{
 					// 初始化为 BigDecimal.ZERO
 					"init_script": "state.total = new BigDecimal('0')",
 					// 将每个值转换为 BigDecimal 并累加（保证精度）
