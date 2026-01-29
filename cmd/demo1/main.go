@@ -372,29 +372,31 @@ func dataExists(db *sql.DB, es *elastic.Client) bool {
 // --- 初始化逻辑 ---
 func initSchema(db *sql.DB, es *elastic.Client) {
 	if cfg.Mode == "mysql" || cfg.Mode == "all" {
-		// MySQL DDL: 使用 DECIMAL 保证金额精确（幂等操作）
-		// 如果表存在，CREATE TABLE IF NOT EXISTS 不会删除现有数据
 		if db != nil {
+			// 如果是 reload 模式，先删除表以保证 schema 更新
+			if cfg.Reload {
+				fmt.Println(">>> MySQL: 由于启用了 reload 参数，将删除并重建表 customer_orders")
+				_, err := db.Exec(`DROP TABLE IF EXISTS customer_orders`)
+				if err != nil {
+					log.Fatalf("MySQL drop table failed: %v", err)
+				}
+			}
+
+			// MySQL DDL: 使用 DECIMAL 保证金额精确, DATETIME(6) 保证微秒精度
+			// 如果非 reload 模式，CREATE TABLE IF NOT EXISTS 不会删除现有数据
 			_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
 				order_id VARCHAR(64) PRIMARY KEY,
 				customer_id VARCHAR(64),
-				amount DECIMAL(10, 2),
-				create_time DATETIME,
+				amount DECIMAL(19, 9),
+				create_time DATETIME(6),
 				KEY idx_create_time (create_time),
 				KEY idx_amt (amount)
 			)`)
 			if err != nil {
 				log.Fatalf("MySQL create table failed: %v", err)
 			}
-
-			// 如果是 reload 模式，清空表数据以保证与 ES 行为一致
 			if cfg.Reload {
-				fmt.Println(">>> MySQL: 由于启用了 reload 参数，将清空表 customer_orders")
-				_, err := db.Exec(`TRUNCATE TABLE customer_orders`)
-				if err != nil {
-					log.Fatalf("MySQL truncate table failed: %v", err)
-				}
-				fmt.Println(">>> MySQL 表初始化完成（已清空并准备重新加载）")
+				fmt.Println(">>> MySQL 表重建完成")
 			} else {
 				fmt.Println(">>> MySQL 表初始化完成（如果表已存在则保留现有数据）")
 			}
@@ -417,8 +419,8 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 					"properties": {
 						"order_id": { "type": "keyword" },
 						"customer_id": { "type": "keyword" },
-						"amount": { "type": "scaled_float", "scaling_factor": 100 },
-						"create_time": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss" }
+						"amount": { "type": "scaled_float", "scaling_factor": 1000000000 },
+						"create_time": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss.SSSSSS" }
 					}
 				}
 			}`
@@ -468,8 +470,8 @@ func loadData(db *sql.DB, es *elastic.Client) {
 			order := Order{
 				OrderID:    fmt.Sprintf("ORD-%d-%d", time.Now().UnixNano(), i),
 				CustomerID: fmt.Sprintf("CUST-%d", rand.Intn(100000)),
-				Amount:     float64(rand.Intn(100000)) / 100.0, // 随机金额
-				CreateTime: time.Now().Format("2006-01-02 15:04:05"),
+				Amount:     float64(rand.Int63n(100000*1000000000)) / 1000000000.0, // 随机金额, 9位小数精度
+				CreateTime: time.Now().Format("2006-01-02 15:04:05.000000"),
 			}
 			batchData = append(batchData, order)
 			if len(batchData) >= cfg.Batch {
@@ -569,7 +571,7 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 	if sum.Valid {
 		total = sum.Float64
 	}
-	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8d | Type=MySQLSum  | Time=%-10v | Sum=%.2f\n", limit, time.Since(start), total)
+	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8d | Type=MySQLSum  | Time=%-10v | Sum=%.9f\n", limit, time.Since(start), total)
 }
 
 // --- 基准测试: ES 原生聚合 (Scaled Float) ---
@@ -594,7 +596,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 		}
 
 		aggRes, _ := res.Aggregations.Sum("total_amount")
-		fmt.Printf("[ES    ] Scenario=B | Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.2f (Scaled Float)\n", time.Since(start), *aggRes.Value)
+		fmt.Printf("[ES    ] Scenario=B | Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.9f (Scaled Float)\n", time.Since(start), *aggRes.Value)
 		return
 	}
 
@@ -618,7 +620,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 			sum += o.Amount
 		}
 	}
-	fmt.Printf("[ES    ] Scenario=B | Limit=%-8d | Type=RowFetch | Time=%-10v | Sum=%.2f (Scaled Float, client-side)\n", limit, time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=B | Limit=%-8d | Type=RowFetch | Time=%-10v | Sum=%.9f (Scaled Float, client-side)\n", limit, time.Since(start), sum)
 }
 
 // --- 基准测试: ES 脚本聚合 (使用原生 JSON) ---
@@ -719,5 +721,5 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 			sum += o.Amount
 		}
 	}
-	fmt.Printf("[ES    ] Scenario=C | Limit=%-8d | Type=ScriptFetch | Time=%-10v | Sum=%.2f (client-side)\n", limit, time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=C | Limit=%-8d | Type=ScriptFetch | Time=%-10v | Sum=%.9f (client-side)\n", limit, time.Since(start), sum)
 }
