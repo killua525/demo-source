@@ -1,1 +1,22 @@
+# IDE
 .vscode
+.idea
+
+# Go 编译中间文件
+*.o
+*.a
+*.so
+*.exe
+*.dll
+
+# Go 生成文件目录
+bin/
+dist/
+
+# Go 依赖文件
+go.sum
+vendor/
+
+# 系统文件
+.DS_Store
+Thumbs.db
