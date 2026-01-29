@@ -20,8 +20,14 @@ all: build
 build: clean
 	@echo "正在编译 $(PROJECT_NAME)..."
 	@mkdir -p $(OUTPUT_DIR)
-	$(GO) build $(GOFLAG) $(LDFLAGS) -o $(BIN) $(CMD_DIR)
+	$(GO) build $(GOFLAG) $(LDFLAGS) -o $(BIN) ./cmd/demo1
 	@echo "编译完成: $(BIN)"
+
+# 安装到 $GOPATH/bin
+install:
+	@echo "正在安装 $(PROJECT_NAME)..."
+	$(GO) install $(GOFLAG) $(LDFLAGS) ./cmd/demo1
+	@echo "安装完成"
 
 # 清理生成的文件
 clean:
@@ -59,6 +65,7 @@ deps:
 help:
 	@echo "可用命令:"
 	@echo "  make build    - 编译项目"
+	@echo "  make install  - 安装到 $$GOPATH/bin"
 	@echo "  make clean    - 清理生成的文件"
 	@echo "  make run      - 编译并运行程序"
 	@echo "  make fmt      - 格式化代码"
