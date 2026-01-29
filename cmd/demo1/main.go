@@ -18,10 +18,12 @@ import (
 
 // --- 配置对象 ---
 type Config struct {
-	MySQLDSN string
-	ESUrl    string
-	Total    int
-	Batch    int
+	MySQLDSN   string
+	ESUrl      string
+	ESUser     string
+	ESPassword string
+	Total      int
+	Batch      int
 }
 
 // --- 实体对象 ---
@@ -38,6 +40,8 @@ func init() {
 	// 命令行参数解析
 	flag.StringVar(&cfg.MySQLDSN, "mysql", "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True", "MySQL连接串")
 	flag.StringVar(&cfg.ESUrl, "es", "http://127.0.0.1:9200", "ES地址")
+	flag.StringVar(&cfg.ESUser, "esuser", "", "ES用户名（可选）")
+	flag.StringVar(&cfg.ESPassword, "espass", "", "ES密码（可选）")
 	// 默认跑 20万数据做演示，正式跑可以指定 -total 20000000
 	flag.IntVar(&cfg.Total, "total", 200000, "总数据量")
 	flag.IntVar(&cfg.Batch, "batch", 2000, "批量插入的大小")
@@ -57,10 +61,15 @@ func main() {
 	db.SetMaxIdleConns(10)
 
 	// 2. 初始化 ES
-	esClient, err := elastic.NewClient(
+	esClientOpts := []elastic.ClientOptionFunc{
 		elastic.SetURL(cfg.ESUrl),
 		elastic.SetSniff(false), // 单节点建议关闭
-	)
+	}
+	// 如果提供了用户名和密码，添加认证
+	if cfg.ESUser != "" && cfg.ESPassword != "" {
+		esClientOpts = append(esClientOpts, elastic.SetBasicAuth(cfg.ESUser, cfg.ESPassword))
+	}
+	esClient, err := elastic.NewClient(esClientOpts...)
 	if err != nil {
 		log.Fatalf("ES connect failed: %v", err)
 	}

@@ -68,12 +68,24 @@ demo1 -mysql "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=
       -batch 2000
 ```
 
+#### 带有 ES 认证的配置
+
+```bash
+# 如果 Elasticsearch 需要用户名和密码认证
+demo1 -es "http://127.0.0.1:9200" \
+      -esuser "elastic" \
+      -espass "your_password" \
+      -total 200000
+```
+
 #### 参数说明
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `-mysql` | MySQL 连接字符串 | `root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True` |
 | `-es` | Elasticsearch 服务地址 | `http://127.0.0.1:9200` |
+| `-esuser` | Elasticsearch 用户名（可选） | 空（不认证） |
+| `-espass` | Elasticsearch 密码（可选） | 空（不认证） |
 | `-total` | 总数据量 | `200000` |
 | `-batch` | 批量插入大小 | `2000` |
 
