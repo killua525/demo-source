@@ -59,29 +59,73 @@ demo1
 demo1 -help
 ```
 
-### 配置参数
+### 使用配置文件
+
+程序支持从配置文件读取 MySQL 和 Elasticsearch 的配置，方便管理。
+
+#### 方式一：自动加载默认配置文件
+
+在项目根目录创建 `config.yaml` 文件，程序会自动读取：
 
 ```bash
-demo1 -mysql "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True" \
-      -es "http://127.0.0.1:9200" \
-      -total 200000 \
-      -batch 2000
+# 项目根目录结构
+.
+├── config.yaml      # 配置文件
+├── cmd/
+│   └── demo1/
+│       └── main.go
+└── bin/
+    └── demo1       # 编译后的二进制文件
+
+# 运行程序时会自动加载 config.yaml
+cd /path/to/demo-source
+demo1
 ```
 
-#### 带有 ES 认证的配置
+#### 方式二：指定配置文件路径
 
 ```bash
-# 如果 Elasticsearch 需要用户名和密码认证
-demo1 -es "http://127.0.0.1:9200" \
-      -esuser "elastic" \
-      -espass "your_password" \
-      -total 200000
+demo1 -config /path/to/config.yaml
+```
+
+#### 配置文件示例（config.yaml）
+
+```yaml
+# MySQL 配置
+mysql:
+  dsn: "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+
+# Elasticsearch 配置
+elasticsearch:
+  url: "http://127.0.0.1:9200"
+  username: "elastic"  # 可选，若为空则不使用认证
+  password: "password" # 可选，若为空则不使用认证
+
+# 数据处理配置
+data:
+  total: 200000    # 总数据量
+  batch: 2000      # 批量插入大小
+```
+
+### 配置参数优先级
+
+程序的配置优先级（从高到低）：
+1. **命令行参数** - 最高优先级
+2. **指定的配置文件** - 通过 `-config` 参数指定
+3. **默认配置文件** - 当前目录的 `config.yaml`
+4. **代码中的默认值** - 最低优先级
+
+例如：
+```bash
+# 虽然配置文件设置了 total: 100000，但命令行参数会覆盖它
+demo1 -config config.yaml -total 500000
 ```
 
 #### 参数说明
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
+| `-config` | 配置文件路径 | 若当前目录存在 config.yaml 则使用 |
 | `-mysql` | MySQL 连接字符串 | `root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True` |
 | `-es` | Elasticsearch 服务地址 | `http://127.0.0.1:9200` |
 | `-esuser` | Elasticsearch 用户名（可选） | 空（不认证） |

@@ -1,0 +1,17 @@
+# demo1 配置文件示例
+# 命令行参数会覆盖配置文件中的设置
+
+# MySQL 配置
+mysql:
+  dsn: "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+
+# Elasticsearch 配置
+elasticsearch:
+  url: "http://127.0.0.1:9200"
+  username: ""  # 可选，若为空则不使用认证
+  password: ""  # 可选，若为空则不使用认证
+
+# 数据处理配置
+data:
+  total: 200000    # 总数据量
+  batch: 2000      # 批量插入大小

@@ -6,15 +6,34 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/olivere/elastic/v7"
+	"gopkg.in/yaml.v2"
 )
+
+// --- 配置文件结构 ---
+type ConfigFile struct {
+	MySQL struct {
+		DSN string `yaml:"dsn"`
+	} `yaml:"mysql"`
+	Elasticsearch struct {
+		URL      string `yaml:"url"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+	} `yaml:"elasticsearch"`
+	Data struct {
+		Total int `yaml:"total"`
+		Batch int `yaml:"batch"`
+	} `yaml:"data"`
+}
 
 // --- 配置对象 ---
 type Config struct {
@@ -37,15 +56,66 @@ type Order struct {
 var cfg Config
 
 func init() {
+	// 设置默认值
+	cfg.MySQLDSN = "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+	cfg.ESUrl = "http://127.0.0.1:9200"
+	cfg.Total = 200000
+	cfg.Batch = 2000
+
 	// 命令行参数解析
-	flag.StringVar(&cfg.MySQLDSN, "mysql", "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True", "MySQL连接串")
-	flag.StringVar(&cfg.ESUrl, "es", "http://127.0.0.1:9200", "ES地址")
+	configFile := flag.String("config", "", "配置文件路径 (config.yaml)")
+	flag.StringVar(&cfg.MySQLDSN, "mysql", cfg.MySQLDSN, "MySQL连接串")
+	flag.StringVar(&cfg.ESUrl, "es", cfg.ESUrl, "ES地址")
 	flag.StringVar(&cfg.ESUser, "esuser", "", "ES用户名（可选）")
 	flag.StringVar(&cfg.ESPassword, "espass", "", "ES密码（可选）")
-	// 默认跑 20万数据做演示，正式跑可以指定 -total 20000000
-	flag.IntVar(&cfg.Total, "total", 200000, "总数据量")
-	flag.IntVar(&cfg.Batch, "batch", 2000, "批量插入的大小")
+	flag.IntVar(&cfg.Total, "total", cfg.Total, "总数据量")
+	flag.IntVar(&cfg.Batch, "batch", cfg.Batch, "批量插入的大小")
 	flag.Parse()
+
+	// 如果指定了配置文件，则从配置文件读取
+	if *configFile != "" {
+		loadConfigFile(*configFile)
+	} else if _, err := os.Stat("config.yaml"); err == nil {
+		// 如果没有指定但存在默认 config.yaml 文件，使用它
+		loadConfigFile("config.yaml")
+	}
+	// 命令行参数优先级更高，如果在命令行指定了非默认值，则覆盖配置文件的值
+}
+
+// 从配置文件加载配置
+func loadConfigFile(filePath string) {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		log.Fatalf("Failed to read config file: %v", err)
+	}
+
+	var cfgFile ConfigFile
+	err = yaml.Unmarshal(data, &cfgFile)
+	if err != nil {
+		log.Fatalf("Failed to parse config file: %v", err)
+	}
+
+	// 只有在非空时才覆盖默认值
+	if cfgFile.MySQL.DSN != "" {
+		cfg.MySQLDSN = cfgFile.MySQL.DSN
+	}
+	if cfgFile.Elasticsearch.URL != "" {
+		cfg.ESUrl = cfgFile.Elasticsearch.URL
+	}
+	if cfgFile.Elasticsearch.Username != "" {
+		cfg.ESUser = cfgFile.Elasticsearch.Username
+	}
+	if cfgFile.Elasticsearch.Password != "" {
+		cfg.ESPassword = cfgFile.Elasticsearch.Password
+	}
+	if cfgFile.Data.Total > 0 {
+		cfg.Total = cfgFile.Data.Total
+	}
+	if cfgFile.Data.Batch > 0 {
+		cfg.Batch = cfgFile.Data.Batch
+	}
+
+	fmt.Printf(">>> 已从配置文件加载配置: %s\n", filePath)
 }
 
 func main() {
