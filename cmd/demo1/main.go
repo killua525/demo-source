@@ -218,11 +218,14 @@ func main() {
 		fmt.Println(">>> Elasticsearch 连接成功")
 	}
 
-	// 3. 初始化 Schema (表结构 + 索引配置)
-	initSchema(db, esClient)
-
-	// 4. 检查数据是否已存在，如果不需要 reload 则跳过加载
+	// 3. 检查数据是否已存在，如果不需要 reload 则跳过加载
 	shouldLoadData := cfg.Reload || !dataExists(db, esClient)
+
+	// 4. 初始化 Schema (表结构 + 索引配置)
+	// 只有当需要加载数据时才初始化 Schema（会删除并重建）
+	if shouldLoadData {
+		initSchema(db, esClient)
+	}
 	if shouldLoadData {
 		// 数据加载 (Producer-Consumer 模型)
 		fmt.Printf(">>> [Phase 1] 开始加载 %d 条数据...\n", cfg.Total)
@@ -232,9 +235,6 @@ func main() {
 	} else {
 		fmt.Println(">>> [Phase 1] 数据已存在，跳过数据加载（若需重新加载，请使用 -reload 参数）\n")
 	}
-
-	// 5. 开始基准测试
-	// 5. 开始基准测试
 	// 测试不同数据规模下的性能
 	queryLevels := cfg.QueryLevels
 	// 如果没有通过参数指定，使用默认规模
@@ -347,6 +347,7 @@ func dataExists(db *sql.DB, es *elastic.Client) bool {
 func initSchema(db *sql.DB, es *elastic.Client) {
 	if cfg.Mode == "mysql" || cfg.Mode == "all" {
 		// MySQL DDL: 使用 DECIMAL 保证金额精确（幂等操作）
+		// 如果表存在，CREATE TABLE IF NOT EXISTS 不会删除现有数据
 		if db != nil {
 			_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
 				order_id VARCHAR(64) PRIMARY KEY,
@@ -358,7 +359,7 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 			if err != nil {
 				log.Fatalf("MySQL init table failed: %v", err)
 			}
-			fmt.Println(">>> MySQL 表初始化完成")
+			fmt.Println(">>> MySQL 表初始化完成（如果表已存在则保留现有数据）")
 		}
 	}
 
@@ -366,6 +367,7 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 		// ES Mapping: 
 		// 1. 设置 max_result_window 为 1000w
 		// 2. 设置 amount 为 scaled_float，因子 100
+		// 注意：只有在 reload 模式下才会删除重建索引
 		if es != nil {
 			mapping := `{
 				"settings": {
@@ -385,14 +387,27 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 			ctx := context.Background()
 			exists, _ := es.IndexExists("customer_orders").Do(ctx)
 			if exists {
-				// 删除旧索引（幂等操作）
-				es.DeleteIndex("customer_orders").Do(ctx)
+				// 索引已存在
+				if cfg.Reload {
+					// reload 模式下才删除重建
+					fmt.Println(">>> Elasticsearch 检测到索引存在，由于启用了 reload 参数，将删除并重建索引")
+					es.DeleteIndex("customer_orders").Do(ctx)
+					_, err := es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
+					if err != nil {
+						log.Fatalf("ES create index failed: %v", err)
+					}
+					fmt.Println(">>> Elasticsearch 索引重建完成")
+				} else {
+					fmt.Println(">>> Elasticsearch 索引初始化完成（索引已存在，保留现有数据）")
+				}
+			} else {
+				// 索引不存在，创建新索引
+				_, err := es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
+				if err != nil {
+					log.Fatalf("ES create index failed: %v", err)
+				}
+				fmt.Println(">>> Elasticsearch 索引初始化完成（新建索引）")
 			}
-			_, err := es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
-			if err != nil {
-				log.Fatalf("ES create index failed: %v", err)
-			}
-			fmt.Println(">>> Elasticsearch 索引初始化完成")
 		}
 	}
 	
