@@ -48,6 +48,7 @@ type Config struct {
 	ESPassword string
 	Total      int
 	Batch      int
+	Mode       string // all(默认), mysql, es
 }
 
 // --- 实体对象 ---
@@ -74,6 +75,7 @@ func init() {
 	flag.StringVar(&cfg.ESUrl, "es", cfg.ESUrl, "ES地址")
 	flag.StringVar(&cfg.ESUser, "esuser", "", "ES用户名（可选）")
 	flag.StringVar(&cfg.ESPassword, "espass", "", "ES密码（可选）")
+	flag.StringVar(&cfg.Mode, "mode", "all", "运行模式: all(默认), mysql, es")
 	flag.IntVar(&cfg.Total, "total", cfg.Total, "总数据量")
 	flag.IntVar(&cfg.Batch, "batch", cfg.Batch, "批量插入的大小")
 	flag.Parse()
@@ -174,79 +176,93 @@ func main() {
 	fmt.Printf(">>> 数据加载完成，耗时: %v\n\n", time.Since(start))
 
 	// 5. 开始基准测试
-	// 测试不同数据规模下的性能
-	queryLevels := []int{10000, 100000}
-	if cfg.Total >= 1000000 {
-		queryLevels = append(queryLevels, 1000000)
-	}
-	// 如果总数够大，最后测试全量
-	if cfg.Total > 1000000 {
-		queryLevels = append(queryLevels, cfg.Total)
-	}
-
-	fmt.Println(">>> [Phase 2] 开始查询性能测试...")
-	for _, limit := range queryLevels {
-		fmt.Printf("\n--- 测试数据规模: %d ---\n", limit)
-
-		// 场景 A: MySQL 查询 + 应用层求和
-		benchmarkMySQL(db, limit)
-
-		// 场景 B: ES 原生聚合 (Scaled Float) - 推荐
-		// 注意：聚合通常针对全量或Query过滤后的数据，这里我们用 MatchAll 模拟全量
-		if limit == cfg.Total {
-			benchmarkESNativeAgg(esClient)
+	// 仅在 all 模式下进行性能测试
+	if cfg.Mode == "all" {
+		// 测试不同数据规模下的性能
+		queryLevels := []int{10000, 100000}
+		if cfg.Total >= 1000000 {
+			queryLevels = append(queryLevels, 1000000)
+		}
+		// 如果总数够大，最后测试全量
+		if cfg.Total > 1000000 {
+			queryLevels = append(queryLevels, cfg.Total)
 		}
 
-		// 场景 C: ES 脚本聚合 (BigDecimal) - 特殊需求
-		if limit == cfg.Total {
-			benchmarkESScriptAgg(esClient)
+		fmt.Println(">>> [Phase 2] 开始查询性能测试...")
+		for _, limit := range queryLevels {
+			fmt.Printf("\n--- 测试数据规模: %d ---\n", limit)
+
+			// 场景 A: MySQL 查询 + 应用层求和
+			benchmarkMySQL(db, limit)
+
+			// 场景 B: ES 原生聚合 (Scaled Float) - 推荐
+			// 注意：聚合通常针对全量或Query过滤后的数据，这里我们用 MatchAll 模拟全量
+			if limit == cfg.Total {
+				benchmarkESNativeAgg(esClient)
+			}
+
+			// 场景 C: ES 脚本聚合 (BigDecimal) - 特殊需求
+			if limit == cfg.Total {
+				benchmarkESScriptAgg(esClient)
+			}
 		}
+	} else {
+		fmt.Printf(">>> 运行模式: %s (仅加载数据，跳过性能测试)\n", cfg.Mode)
 	}
 }
 
 // --- 初始化逻辑 ---
 func initSchema(db *sql.DB, es *elastic.Client) {
-	// MySQL DDL: 使用 DECIMAL 保证金额精确
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
-		order_id VARCHAR(64) PRIMARY KEY,
-		customer_id VARCHAR(64),
-		amount DECIMAL(10, 2),
-		create_time DATETIME,
-		KEY idx_amt (amount)
-	)`)
-	if err != nil {
-		log.Fatalf("MySQL init table failed: %v", err)
-	}
-	// db.Exec("TRUNCATE TABLE customer_orders") // 可选：清空旧数据
-
-	// ES Mapping: 
-	// 1. 设置 max_result_window 为 1000w (虽然聚合不需要这个，但为了满足你的要求)
-	// 2. 设置 amount 为 scaled_float，因子 100
-	mapping := `{
-		"settings": {
-			"number_of_shards": 3,
-			"number_of_replicas": 0,
-			"max_result_window": 10000000
-		},
-		"mappings": {
-			"properties": {
-				"order_id": { "type": "keyword" },
-				"customer_id": { "type": "keyword" },
-				"amount": { "type": "scaled_float", "scaling_factor": 100 },
-				"create_time": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss" }
-			}
+	if cfg.Mode == "es" || cfg.Mode == "all" {
+		// MySQL DDL: 使用 DECIMAL 保证金额精确（幂等操作）
+		_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
+			order_id VARCHAR(64) PRIMARY KEY,
+			customer_id VARCHAR(64),
+			amount DECIMAL(10, 2),
+			create_time DATETIME,
+			KEY idx_amt (amount)
+		)`)
+		if err != nil {
+			log.Fatalf("MySQL init table failed: %v", err)
 		}
-	}`
-	ctx := context.Background()
-	exists, _ := es.IndexExists("customer_orders").Do(ctx)
-	if exists {
-		es.DeleteIndex("customer_orders").Do(ctx)
+		fmt.Println(">>> MySQL 表初始化完成")
 	}
-	_, err = es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
-	if err != nil {
-		log.Fatalf("ES create index failed: %v", err)
+
+	if cfg.Mode == "mysql" || cfg.Mode == "all" {
+		// ES Mapping: 
+		// 1. 设置 max_result_window 为 1000w
+		// 2. 设置 amount 为 scaled_float，因子 100
+		mapping := `{
+			"settings": {
+				"number_of_shards": 3,
+				"number_of_replicas": 0,
+				"max_result_window": 10000000
+			},
+			"mappings": {
+				"properties": {
+					"order_id": { "type": "keyword" },
+					"customer_id": { "type": "keyword" },
+					"amount": { "type": "scaled_float", "scaling_factor": 100 },
+					"create_time": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss" }
+				}
+			}
+		}`
+		ctx := context.Background()
+		exists, _ := es.IndexExists("customer_orders").Do(ctx)
+		if exists {
+			// 删除旧索引（幂等操作）
+			es.DeleteIndex("customer_orders").Do(ctx)
+		}
+		_, err := es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
+		if err != nil {
+			log.Fatalf("ES create index failed: %v", err)
+		}
+		fmt.Println(">>> Elasticsearch 索引初始化完成")
 	}
-	fmt.Println(">>> Schema 初始化完毕 (MySQL Table + ES Index with max_result_window=1000w)")
+	
+	if cfg.Mode == "all" {
+		fmt.Println(">>> Schema 初始化完毕 (MySQL Table + ES Index)")
+	}
 }
 
 // --- 数据加载 (并发) ---
@@ -286,15 +302,23 @@ func loadData(db *sql.DB, es *elastic.Client) {
 		go func() {
 			defer wg.Done()
 			for batch := range dataChan {
-				writeMySQL(db, batch)
-				writeES(es, batch)
+				// 根据 mode 参数决定是否写入 MySQL 或 ES
+				if cfg.Mode == "mysql" || cfg.Mode == "all" {
+					writeMySQL(db, batch)
+				}
+				if cfg.Mode == "es" || cfg.Mode == "all" {
+					writeES(es, batch)
+				}
 			}
 		}()
 	}
 	wg.Wait()
 	
-	// 强制刷新 ES，确保数据立即可查
-	es.Refresh("customer_orders").Do(context.Background())
+	// 只有 ES 模式或 all 模式才需要刷新 ES
+	if cfg.Mode == "es" || cfg.Mode == "all" {
+		// 强制刷新 ES，确保数据立即可查
+		es.Refresh("customer_orders").Do(context.Background())
+	}
 }
 
 func writeMySQL(db *sql.DB, orders []Order) {
