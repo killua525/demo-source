@@ -534,22 +534,27 @@ func writeES(es *elastic.Client, orders []Order) {
 // --- 基准测试: MySQL ---
 func benchmarkMySQL(db *sql.DB, limit int) {
 	start := time.Now()
-	// 模拟应用层拉取数据求和
-	// 为了与 ES 保持一致，对 LIMIT 使用确定性排序：按 create_time 升序
-	rows, err := db.Query("SELECT amount FROM customer_orders ORDER BY create_time ASC LIMIT ?", limit)
+	var sum sql.NullFloat64
+	var err error
+
+	if limit == 0 {
+		// 全量：直接用 MySQL SUM 函数
+		err = db.QueryRow("SELECT SUM(amount) FROM customer_orders").Scan(&sum)
+	} else {
+		// 部分数据：使用 ORDER BY 和 LIMIT，然后对结果求和
+		err = db.QueryRow("SELECT SUM(amount) FROM customer_orders ORDER BY create_time ASC LIMIT ?", limit).Scan(&sum)
+	}
+
 	if err != nil {
 		log.Printf("MySQL Query Error: %v", err)
 		return
 	}
-	defer rows.Close()
 
-	var sum float64
-	var amount float64
-	for rows.Next() {
-		rows.Scan(&amount)
-		sum += amount
+	total := 0.0
+	if sum.Valid {
+		total = sum.Float64
 	}
-	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8d | Type=RowScan | Time=%-10v | Sum=%.2f\n", limit, time.Since(start), sum)
+	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8d | Type=MySQLSum  | Time=%-10v | Sum=%.2f\n", limit, time.Since(start), total)
 }
 
 // --- 基准测试: ES 原生聚合 (Scaled Float) ---
