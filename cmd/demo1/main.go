@@ -710,34 +710,45 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 		return
 	}
 
-	// 部分数据：使用 script_fields 获取 BigDecimal 字符串，然后在客户端用 big.Float 求和
-	// 这确保了即使在部分数据场景下，也使用了脚本，并进行了高精度计算
-	script := elastic.NewScript("return new java.math.BigDecimal(String.valueOf(doc['amount'].value)).toPlainString()")
+	// 部分数据：用 script_fields 输出 BigDecimal 字符串，再在客户端高精度求和
+	searchBody := map[string]interface{}{
+		"size": limit,
+		"query": map[string]interface{}{
+			"match_all": map[string]interface{}{},
+		},
+		"sort": []map[string]interface{}{
+			{"create_time": map[string]interface{}{"order": "asc"}},
+		},
+		"_source": false,
+		"script_fields": map[string]interface{}{
+			"bd_amount": map[string]interface{}{
+				"script": map[string]interface{}{
+					"source": "return new java.math.BigDecimal(String.valueOf(doc['amount'].value)).toPlainString()",
+				},
+			},
+		},
+	}
+
 	sr, err := es.Search().
 		Index("customer_orders").
-		Query(elastic.NewMatchAllQuery()).
-		Sort("create_time", true).
-		Size(limit).
-		ScriptFields(elastic.NewScriptField("bd_amount", script)).
-		FetchSource(false). // We only need the script field
+		Source(searchBody).
 		Do(ctx)
 	if err != nil {
 		log.Printf("ES Script partial fetch error: %v", err)
 		return
 	}
 
-	sum := new(big.Float)
+	sum := new(big.Rat).SetInt64(0)
 	for _, hit := range sr.Hits.Hits {
 		if val, found := hit.Fields["bd_amount"]; found && val != nil {
-			// The value is returned in an array
 			if values, ok := val.([]interface{}); ok && len(values) > 0 {
 				if strVal, ok := values[0].(string); ok {
-					if amount, _, pErr := big.ParseFloat(strVal, 10, 256, big.ToNearestEven); pErr == nil {
-						sum.Add(sum, amount)
+					if rat, ok := new(big.Rat).SetString(strVal); ok {
+						sum.Add(sum, rat)
 					}
 				}
 			}
 		}
 	}
-	fmt.Printf("[ES    ] Scenario=C | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%s (big.Float, client-side)\n", strconv.Itoa(limit), "ScriptFetch", time.Since(start), sum.Text('f', 9))
+	fmt.Printf("[ES    ] Scenario=C | Limit=%-8d | Type=%-11s | Time=%-12s | Sum=%s (BigDecimal, client-side)\n", limit, "ScriptFetch", time.Since(start), sum.FloatString(2))
 }
