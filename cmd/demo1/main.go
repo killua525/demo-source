@@ -68,16 +68,16 @@ func init() {
 	cfg.Total = 200000
 	cfg.Batch = 2000
 
-	// 命令行参数解析
+	// 命令行参数解析（使用临时变量来检测用户是否显式设置了参数）
 	showVersion := flag.Bool("version", false, "显示版本信息")
 	configFile := flag.String("config", "", "配置文件路径 (config.yaml)")
-	flag.StringVar(&cfg.MySQLDSN, "mysql", cfg.MySQLDSN, "MySQL连接串")
-	flag.StringVar(&cfg.ESUrl, "es", cfg.ESUrl, "ES地址")
-	flag.StringVar(&cfg.ESUser, "esuser", "", "ES用户名（可选）")
-	flag.StringVar(&cfg.ESPassword, "espass", "", "ES密码（可选）")
-	flag.StringVar(&cfg.Mode, "mode", "all", "运行模式: all(默认), mysql, es")
-	flag.IntVar(&cfg.Total, "total", cfg.Total, "总数据量")
-	flag.IntVar(&cfg.Batch, "batch", cfg.Batch, "批量插入的大小")
+	mysqlFlag := flag.String("mysql", "", "MySQL连接串")
+	esFlag := flag.String("es", "", "ES地址")
+	esuserFlag := flag.String("esuser", "", "ES用户名（可选）")
+	espassFlag := flag.String("espass", "", "ES密码（可选）")
+	modeFlag := flag.String("mode", "", "运行模式: all(默认), mysql, es")
+	totalFlag := flag.Int("total", 0, "总数据量")
+	batchFlag := flag.Int("batch", 0, "批量插入的大小")
 	flag.Parse()
 
 	// 如果请求显示版本信息
@@ -86,14 +86,37 @@ func init() {
 		os.Exit(0)
 	}
 
-	// 如果指定了配置文件，则从配置文件读取
+	// 优先级：默认值 → 配置文件 → 命令行参数
+	// 1. 先从配置文件加载（如果存在），覆盖默认值
 	if *configFile != "" {
 		loadConfigFile(*configFile)
 	} else if _, err := os.Stat("config.yaml"); err == nil {
 		// 如果没有指定但存在默认 config.yaml 文件，使用它
 		loadConfigFile("config.yaml")
 	}
-	// 命令行参数优先级更高，如果在命令行指定了非默认值，则覆盖配置文件的值
+
+	// 2. 再从命令行参数加载（如果用户显式指定了），覆盖配置文件和默认值
+	if *mysqlFlag != "" {
+		cfg.MySQLDSN = *mysqlFlag
+	}
+	if *esFlag != "" {
+		cfg.ESUrl = *esFlag
+	}
+	if *esuserFlag != "" {
+		cfg.ESUser = *esuserFlag
+	}
+	if *espassFlag != "" {
+		cfg.ESPassword = *espassFlag
+	}
+	if *modeFlag != "" {
+		cfg.Mode = *modeFlag
+	}
+	if *totalFlag != 0 {
+		cfg.Total = *totalFlag
+	}
+	if *batchFlag != 0 {
+		cfg.Batch = *batchFlag
+	}
 }
 
 // 打印版本信息
