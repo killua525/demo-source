@@ -283,13 +283,32 @@ func dataExists(db *sql.DB, es *elastic.Client) bool {
 	// 检查 MySQL 数据是否存在
 	if cfg.Mode == "mysql" || cfg.Mode == "all" {
 		if db != nil {
-			var count int
-			err := db.QueryRow("SELECT COUNT(*) FROM customer_orders").Scan(&count)
-			if err != nil || count == 0 {
-				fmt.Println(">>> [检查数据] MySQL 表 customer_orders 不存在或为空")
+			// 先检查表是否存在（通过 information_schema）
+			var tableExists int
+			err := db.QueryRow(`
+				SELECT COUNT(*) FROM information_schema.TABLES 
+				WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'customer_orders'
+			`).Scan(&tableExists)
+			
+			if err != nil {
+				fmt.Printf(">>> [检查数据] MySQL 检查表出错: %v\n", err)
+				hasData = false
+			} else if tableExists == 0 {
+				fmt.Println(">>> [检查数据] MySQL 表 customer_orders 不存在")
 				hasData = false
 			} else {
-				fmt.Printf(">>> [检查数据] MySQL 表 customer_orders 已存在，当前数据量: %d 条\n", count)
+				// 表存在，再检查数据量
+				var count int
+				err := db.QueryRow("SELECT COUNT(*) FROM customer_orders").Scan(&count)
+				if err != nil {
+					fmt.Printf(">>> [检查数据] MySQL 统计数据出错: %v\n", err)
+					hasData = false
+				} else if count == 0 {
+					fmt.Println(">>> [检查数据] MySQL 表 customer_orders 存在，但数据为空")
+					hasData = false
+				} else {
+					fmt.Printf(">>> [检查数据] MySQL 表 customer_orders 已存在，当前数据量: %d 条\n", count)
+				}
 			}
 		}
 	}
@@ -297,12 +316,26 @@ func dataExists(db *sql.DB, es *elastic.Client) bool {
 	// 检查 ES 数据是否存在
 	if cfg.Mode == "es" || cfg.Mode == "all" {
 		if es != nil {
-			count, err := es.Count("customer_orders").Do(ctx)
-			if err != nil || count == 0 {
-				fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 不存在或为空")
+			// 先检查索引是否存在
+			exists, err := es.IndexExists("customer_orders").Do(ctx)
+			if err != nil {
+				fmt.Printf(">>> [检查数据] Elasticsearch 检查索引出错: %v\n", err)
+				hasData = false
+			} else if !exists {
+				fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 不存在")
 				hasData = false
 			} else {
-				fmt.Printf(">>> [检查数据] Elasticsearch 索引 customer_orders 已存在，当前数据量: %d 条\n", count)
+				// 索引存在，再检查数据量
+				count, err := es.Count("customer_orders").Do(ctx)
+				if err != nil {
+					fmt.Printf(">>> [检查数据] Elasticsearch 统计数据出错: %v\n", err)
+					hasData = false
+				} else if count == 0 {
+					fmt.Println(">>> [检查数据] Elasticsearch 索引 customer_orders 存在，但数据为空")
+					hasData = false
+				} else {
+					fmt.Printf(">>> [检查数据] Elasticsearch 索引 customer_orders 已存在，当前数据量: %d 条\n", count)
+				}
 			}
 		}
 	}
