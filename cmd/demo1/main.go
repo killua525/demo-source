@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,7 @@ type Config struct {
 	Batch      int
 	Mode       string // all(默认), mysql, es
 	Reload     bool   // 是否重新加载数据（默认false：若数据存在则不加载）
+	QueryLevels []int // 测试数据规模（如 1000,100000,1000000）
 }
 
 // --- 实体对象 ---
@@ -80,6 +82,7 @@ func init() {
 	totalFlag := flag.Int("total", 0, "总数据量")
 	batchFlag := flag.Int("batch", 0, "批量插入的大小")
 	reloadFlag := flag.Bool("reload", false, "是否强制重新加载数据")
+	queryLevelsFlag := flag.String("querylevels", "", "测试数据规模，用逗号分隔 (如 1000,100000,1000000)")
 	flag.Parse()
 
 	// 如果请求显示版本信息
@@ -121,6 +124,16 @@ func init() {
 	}
 	if *reloadFlag {
 		cfg.Reload = *reloadFlag
+	}
+	// 解析 QueryLevels 参数
+	if *queryLevelsFlag != "" {
+		levels := strings.Split(*queryLevelsFlag, ",")
+		for _, level := range levels {
+			level = strings.TrimSpace(level)
+			if val, err := strconv.Atoi(level); err == nil && val > 0 {
+				cfg.QueryLevels = append(cfg.QueryLevels, val)
+			}
+		}
 	}
 }
 
@@ -223,13 +236,17 @@ func main() {
 	// 5. 开始基准测试
 	// 5. 开始基准测试
 	// 测试不同数据规模下的性能
-	queryLevels := []int{10000, 100000}
-	if cfg.Total >= 1000000 {
-		queryLevels = append(queryLevels, 1000000)
-	}
-	// 如果总数够大，最后测试全量
-	if cfg.Total > 1000000 {
-		queryLevels = append(queryLevels, cfg.Total)
+	queryLevels := cfg.QueryLevels
+	// 如果没有通过参数指定，使用默认规模
+	if len(queryLevels) == 0 {
+		queryLevels = []int{10000, 100000}
+		if cfg.Total >= 1000000 {
+			queryLevels = append(queryLevels, 1000000)
+		}
+		// 如果总数够大，最后测试全量
+		if cfg.Total > 1000000 {
+			queryLevels = append(queryLevels, cfg.Total)
+		}
 	}
 
 	fmt.Println(">>> [Phase 2] 开始查询性能测试...")
