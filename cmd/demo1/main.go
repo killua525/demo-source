@@ -19,12 +19,14 @@ import (
 	"github.com/olivere/elastic/v7"
 	"gopkg.in/yaml.v2"
 )
+
 // 版本信息，通过编译时 ldflags 注入
 var (
 	Version   = "dev"
 	CommitID  = "unknown"
 	BuildTime = "unknown"
 )
+
 // --- 配置文件结构 ---
 type ConfigFile struct {
 	MySQL struct {
@@ -43,15 +45,15 @@ type ConfigFile struct {
 
 // --- 配置对象 ---
 type Config struct {
-	MySQLDSN   string
-	ESUrl      string
-	ESUser     string
-	ESPassword string
-	Total      int
-	Batch      int
-	Mode       string // all(默认), mysql, es
-	Reload     bool   // 是否重新加载数据（默认false：若数据存在则不加载）
-	QueryLevels []int // 测试数据规模（如 1000,100000,1000000）
+	MySQLDSN    string
+	ESUrl       string
+	ESUser      string
+	ESPassword  string
+	Total       int
+	Batch       int
+	Mode        string // all(默认), mysql, es
+	Reload      bool   // 是否重新加载数据（默认false：若数据存在则不加载）
+	QueryLevels []int  // 测试数据规模（如 1000,100000,1000000）
 }
 
 // --- 实体对象 ---
@@ -253,25 +255,36 @@ func main() {
 	for _, limit := range queryLevels {
 		fmt.Printf("\n--- 测试数据规模: %d ---\n", limit)
 
+		var wg sync.WaitGroup
+
 		// 场景 A: MySQL 查询 + 应用层求和（在 mysql 或 all 模式下运行）
 		if cfg.Mode == "mysql" || cfg.Mode == "all" {
-			benchmarkMySQL(db, limit)
+			wg.Add(1)
+			go func(l int) {
+				defer wg.Done()
+				benchmarkMySQL(db, l)
+			}(limit)
 		}
 
-		// 场景 B: ES 原生聚合 (Scaled Float)（在 es 或 all 模式下运行）
-		// 注意：聚合通常针对全量或Query过滤后的数据，这里我们用 MatchAll 模拟全量
-		if cfg.Mode == "es" || cfg.Mode == "all" {
-			if limit == cfg.Total {
+		// 场景 B & C: ES 聚合（仅在 es 或 all 模式，并且通常在全量时运行）
+		if (cfg.Mode == "es" || cfg.Mode == "all") && limit == cfg.Total {
+			// 原生聚合
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 				benchmarkESNativeAgg(esClient)
-			}
+			}()
+
+			// 脚本聚合
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				benchmarkESScriptAgg(esClient)
+			}()
 		}
 
-		// 场景 C: ES 脚本聚合 (BigDecimal)（在 es 或 all 模式下运行）
-		if cfg.Mode == "es" || cfg.Mode == "all" {
-			if limit == cfg.Total {
-				benchmarkESScriptAgg(esClient)
-			}
-		}
+		// 等待本次规模的所有测试完成再进入下一个规模
+		wg.Wait()
 	}
 }
 
@@ -289,7 +302,7 @@ func dataExists(db *sql.DB, es *elastic.Client) bool {
 				SELECT COUNT(*) FROM information_schema.TABLES 
 				WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'customer_orders'
 			`).Scan(&tableExists)
-			
+
 			if err != nil {
 				fmt.Printf(">>> [检查数据] MySQL 检查表出错: %v\n", err)
 				hasData = false
@@ -364,7 +377,7 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 	}
 
 	if cfg.Mode == "es" || cfg.Mode == "all" {
-		// ES Mapping: 
+		// ES Mapping:
 		// 1. 设置 max_result_window 为 1000w
 		// 2. 设置 amount 为 scaled_float，因子 100
 		// 注意：只有在 reload 模式下才会删除重建索引
@@ -410,7 +423,7 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 			}
 		}
 	}
-	
+
 	if cfg.Mode == "all" {
 		fmt.Println(">>> Schema 初始化完毕 (MySQL Table + ES Index)")
 	}
@@ -464,7 +477,7 @@ func loadData(db *sql.DB, es *elastic.Client) {
 		}()
 	}
 	wg.Wait()
-	
+
 	// 只有 ES 模式或 all 模式才需要刷新 ES
 	if cfg.Mode == "es" || cfg.Mode == "all" {
 		// 强制刷新 ES，确保数据立即可查
@@ -473,7 +486,9 @@ func loadData(db *sql.DB, es *elastic.Client) {
 }
 
 func writeMySQL(db *sql.DB, orders []Order) {
-	if len(orders) == 0 { return }
+	if len(orders) == 0 {
+		return
+	}
 	sqlStr := "INSERT INTO customer_orders (order_id, customer_id, amount, create_time) VALUES "
 	vals := []interface{}{}
 	placeholders := make([]string, 0, len(orders))
@@ -483,17 +498,23 @@ func writeMySQL(db *sql.DB, orders []Order) {
 	}
 	sqlStr += strings.Join(placeholders, ",")
 	_, err := db.Exec(sqlStr, vals...)
-	if err != nil { log.Printf("MySQL Write Error: %v", err) }
+	if err != nil {
+		log.Printf("MySQL Write Error: %v", err)
+	}
 }
 
 func writeES(es *elastic.Client, orders []Order) {
-	if len(orders) == 0 { return }
+	if len(orders) == 0 {
+		return
+	}
 	bulk := es.Bulk().Index("customer_orders")
 	for _, o := range orders {
 		bulk.Add(elastic.NewBulkIndexRequest().Doc(o))
 	}
 	_, err := bulk.Do(context.Background())
-	if err != nil { log.Printf("ES Write Error: %v", err) }
+	if err != nil {
+		log.Printf("ES Write Error: %v", err)
+	}
 }
 
 // --- 基准测试: MySQL ---
