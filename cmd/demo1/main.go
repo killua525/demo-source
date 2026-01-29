@@ -143,27 +143,38 @@ func loadConfigFile(filePath string) {
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
-	// 1. 初始化 MySQL
-	db, err := sql.Open("mysql", cfg.MySQLDSN)
-	if err != nil {
-		log.Fatalf("MySQL connect failed: %v", err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(10)
+	var db *sql.DB
+	var esClient *elastic.Client
 
-	// 2. 初始化 ES
-	esClientOpts := []elastic.ClientOptionFunc{
-		elastic.SetURL(cfg.ESUrl),
-		elastic.SetSniff(false), // 单节点建议关闭
+	// 1. 根据 mode 参数有条件地初始化 MySQL
+	if cfg.Mode == "mysql" || cfg.Mode == "all" {
+		var err error
+		db, err = sql.Open("mysql", cfg.MySQLDSN)
+		if err != nil {
+			log.Fatalf("MySQL connect failed: %v", err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(20)
+		db.SetMaxIdleConns(10)
+		fmt.Println(">>> MySQL 连接成功")
 	}
-	// 如果提供了用户名和密码，添加认证
-	if cfg.ESUser != "" && cfg.ESPassword != "" {
-		esClientOpts = append(esClientOpts, elastic.SetBasicAuth(cfg.ESUser, cfg.ESPassword))
-	}
-	esClient, err := elastic.NewClient(esClientOpts...)
-	if err != nil {
-		log.Fatalf("ES connect failed: %v", err)
+
+	// 2. 根据 mode 参数有条件地初始化 ES
+	if cfg.Mode == "es" || cfg.Mode == "all" {
+		esClientOpts := []elastic.ClientOptionFunc{
+			elastic.SetURL(cfg.ESUrl),
+			elastic.SetSniff(false), // 单节点建议关闭
+		}
+		// 如果提供了用户名和密码，添加认证
+		if cfg.ESUser != "" && cfg.ESPassword != "" {
+			esClientOpts = append(esClientOpts, elastic.SetBasicAuth(cfg.ESUser, cfg.ESPassword))
+		}
+		var err error
+		esClient, err = elastic.NewClient(esClientOpts...)
+		if err != nil {
+			log.Fatalf("ES connect failed: %v", err)
+		}
+		fmt.Println(">>> Elasticsearch 连接成功")
 	}
 
 	// 3. 初始化 Schema (表结构 + 索引配置)
@@ -213,51 +224,55 @@ func main() {
 
 // --- 初始化逻辑 ---
 func initSchema(db *sql.DB, es *elastic.Client) {
-	if cfg.Mode == "es" || cfg.Mode == "all" {
+	if cfg.Mode == "mysql" || cfg.Mode == "all" {
 		// MySQL DDL: 使用 DECIMAL 保证金额精确（幂等操作）
-		_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
-			order_id VARCHAR(64) PRIMARY KEY,
-			customer_id VARCHAR(64),
-			amount DECIMAL(10, 2),
-			create_time DATETIME,
-			KEY idx_amt (amount)
-		)`)
-		if err != nil {
-			log.Fatalf("MySQL init table failed: %v", err)
+		if db != nil {
+			_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
+				order_id VARCHAR(64) PRIMARY KEY,
+				customer_id VARCHAR(64),
+				amount DECIMAL(10, 2),
+				create_time DATETIME,
+				KEY idx_amt (amount)
+			)`)
+			if err != nil {
+				log.Fatalf("MySQL init table failed: %v", err)
+			}
+			fmt.Println(">>> MySQL 表初始化完成")
 		}
-		fmt.Println(">>> MySQL 表初始化完成")
 	}
 
-	if cfg.Mode == "mysql" || cfg.Mode == "all" {
+	if cfg.Mode == "es" || cfg.Mode == "all" {
 		// ES Mapping: 
 		// 1. 设置 max_result_window 为 1000w
 		// 2. 设置 amount 为 scaled_float，因子 100
-		mapping := `{
-			"settings": {
-				"number_of_shards": 3,
-				"number_of_replicas": 0,
-				"max_result_window": 10000000
-			},
-			"mappings": {
-				"properties": {
-					"order_id": { "type": "keyword" },
-					"customer_id": { "type": "keyword" },
-					"amount": { "type": "scaled_float", "scaling_factor": 100 },
-					"create_time": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss" }
+		if es != nil {
+			mapping := `{
+				"settings": {
+					"number_of_shards": 3,
+					"number_of_replicas": 0,
+					"max_result_window": 10000000
+				},
+				"mappings": {
+					"properties": {
+						"order_id": { "type": "keyword" },
+						"customer_id": { "type": "keyword" },
+						"amount": { "type": "scaled_float", "scaling_factor": 100 },
+						"create_time": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss" }
+					}
 				}
+			}`
+			ctx := context.Background()
+			exists, _ := es.IndexExists("customer_orders").Do(ctx)
+			if exists {
+				// 删除旧索引（幂等操作）
+				es.DeleteIndex("customer_orders").Do(ctx)
 			}
-		}`
-		ctx := context.Background()
-		exists, _ := es.IndexExists("customer_orders").Do(ctx)
-		if exists {
-			// 删除旧索引（幂等操作）
-			es.DeleteIndex("customer_orders").Do(ctx)
+			_, err := es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
+			if err != nil {
+				log.Fatalf("ES create index failed: %v", err)
+			}
+			fmt.Println(">>> Elasticsearch 索引初始化完成")
 		}
-		_, err := es.CreateIndex("customer_orders").BodyString(mapping).Do(ctx)
-		if err != nil {
-			log.Fatalf("ES create index failed: %v", err)
-		}
-		fmt.Println(">>> Elasticsearch 索引初始化完成")
 	}
 	
 	if cfg.Mode == "all" {
