@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"math/rand"
 	"os"
 	"strconv"
@@ -275,7 +276,11 @@ func main() {
 			wg.Add(1)
 			go func(l int) {
 				defer wg.Done()
-				benchmarkMySQL(db, l)
+				if l == cfg.Total {
+					benchmarkMySQL(db, 0)
+				} else {
+					benchmarkMySQL(db, l)
+				}
 			}(limit)
 		}
 
@@ -571,7 +576,11 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 	if sum.Valid {
 		total = sum.Float64
 	}
-	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8d | Type=MySQLSum  | Time=%-10v | Sum=%.9f\n", limit, time.Since(start), total)
+	limitStr := strconv.Itoa(limit)
+	if limit == 0 {
+		limitStr = "ALL"
+	}
+	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%.9f\n", limitStr, "MySQLSum", time.Since(start), total)
 }
 
 // --- 基准测试: ES 原生聚合 (Scaled Float) ---
@@ -596,7 +605,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 		}
 
 		aggRes, _ := res.Aggregations.Sum("total_amount")
-		fmt.Printf("[ES    ] Scenario=B | Limit=ALL      | Type=Native  | Time=%-10v | Sum=%.9f (Scaled Float)\n", time.Since(start), *aggRes.Value)
+		fmt.Printf("[ES    ] Scenario=B | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%.9f (Scaled Float)\n", "ALL", "Native", time.Since(start), *aggRes.Value)
 		return
 	}
 
@@ -620,7 +629,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 			sum += o.Amount
 		}
 	}
-	fmt.Printf("[ES    ] Scenario=B | Limit=%-8d | Type=RowFetch | Time=%-10v | Sum=%.9f (Scaled Float, client-side)\n", limit, time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=B | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%.9f (Scaled Float, client-side)\n", strconv.Itoa(limit), "RowFetch", time.Since(start), sum)
 }
 
 // --- 基准测试: ES 脚本聚合 (使用原生 JSON) ---
@@ -697,29 +706,38 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 			log.Printf("ES Script Agg Error: bd_sum not found in aggregations")
 		}
 
-		fmt.Printf("[ES    ] Scenario=C | Limit=ALL      | Type=Script  | Time=%-10v | Sum=%v (BigDecimal String)\n", time.Since(start), resultValue)
+		fmt.Printf("[ES    ] Scenario=C | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%v (BigDecimal String)\n", "ALL", "Script", time.Since(start), resultValue)
 		return
 	}
 
-	// 部分数据：客户端拉取前 limit 条并求和（按 create_time 升序）以与 MySQL LIMIT 行为一致
+	// 部分数据：使用 script_fields 获取 BigDecimal 字符串，然后在客户端用 big.Float 求和
+	// 这确保了即使在部分数据场景下，也使用了脚本，并进行了高精度计算
+	script := elastic.NewScript("return new java.math.BigDecimal(String.valueOf(doc['amount'].value)).toPlainString()")
 	sr, err := es.Search().
 		Index("customer_orders").
 		Query(elastic.NewMatchAllQuery()).
 		Sort("create_time", true).
 		Size(limit).
-		FetchSourceContext(elastic.NewFetchSourceContext(true).Include("amount")).
+		ScriptFields(elastic.NewScriptField("bd_amount", script)).
+		FetchSource(false). // We only need the script field
 		Do(ctx)
 	if err != nil {
 		log.Printf("ES Script partial fetch error: %v", err)
 		return
 	}
 
-	var sum float64
+	sum := new(big.Float)
 	for _, hit := range sr.Hits.Hits {
-		var o Order
-		if err := json.Unmarshal(hit.Source, &o); err == nil {
-			sum += o.Amount
+		if val, found := hit.Fields["bd_amount"]; found && val != nil {
+			// The value is returned in an array
+			if values, ok := val.([]interface{}); ok && len(values) > 0 {
+				if strVal, ok := values[0].(string); ok {
+					if amount, _, pErr := big.ParseFloat(strVal, 10, 256, big.ToNearestEven); pErr == nil {
+						sum.Add(sum, amount)
+					}
+				}
+			}
 		}
 	}
-	fmt.Printf("[ES    ] Scenario=C | Limit=%-8d | Type=ScriptFetch | Time=%-10v | Sum=%.9f (client-side)\n", limit, time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=C | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%s (big.Float, client-side)\n", strconv.Itoa(limit), "ScriptFetch", time.Since(start), sum.Text('f', 9))
 }
