@@ -552,19 +552,19 @@ func writeES(es *elastic.Client, orders []Order) {
 // --- 基准测试: MySQL ---
 func benchmarkMySQL(db *sql.DB, limit int) {
 	start := time.Now()
-	var sum sql.NullFloat64
+	var sumStr sql.NullString
 	var err error
 
 	if limit == 0 {
-		// 全量：直接用 MySQL SUM 函数
-		err = db.QueryRow("SELECT SUM(amount) FROM customer_orders").Scan(&sum)
+		// 全量：直接用 MySQL SUM 函数，CAST 为 CHAR 保留精度
+		err = db.QueryRow("SELECT CAST(SUM(amount) AS CHAR) FROM customer_orders").Scan(&sumStr)
 	} else {
 		// 部分数据：使用 ORDER BY 和 LIMIT，然后对结果求和
 		// 标准SQL应该使用子查询来确保先排序和限制，再聚合，以保证逻辑正确性
 		err = db.QueryRow(`
-			SELECT SUM(amount) FROM
+			SELECT CAST(SUM(amount) AS CHAR) FROM
 			(SELECT amount FROM customer_orders ORDER BY create_time ASC LIMIT ?) AS subquery
-		`, limit).Scan(&sum)
+		`, limit).Scan(&sumStr)
 	}
 
 	if err != nil {
@@ -572,15 +572,15 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 		return
 	}
 
-	total := 0.0
-	if sum.Valid {
-		total = sum.Float64
+	sumValue := "0"
+	if sumStr.Valid {
+		sumValue = sumStr.String
 	}
 	limitStr := strconv.Itoa(limit)
 	if limit == 0 {
 		limitStr = "ALL"
 	}
-	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%.9f\n", limitStr, "MySQLSum", time.Since(start), total)
+	fmt.Printf("[MySQL ] Scenario=A | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%s\n", limitStr, "MySQLSum", time.Since(start), sumValue)
 }
 
 // --- 基准测试: ES 原生聚合 (Scaled Float) ---
