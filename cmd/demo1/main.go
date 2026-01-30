@@ -58,6 +58,7 @@ type Config struct {
 
 // --- 实体对象 ---
 type Order struct {
+	ID         int64   `json:"id"`
 	OrderID    string  `json:"order_id"`
 	CustomerID string  `json:"customer_id"`
 	Amount     float64 `json:"amount"`
@@ -469,6 +470,7 @@ func loadData(db *sql.DB, es *elastic.Client) {
 	var wg sync.WaitGroup
 	// 缓冲通道，防止内存溢出
 	dataChan := make(chan []Order, 100)
+	var idCounter int64 = 1
 
 	// 生产者 Goroutine
 	go func() {
@@ -476,11 +478,13 @@ func loadData(db *sql.DB, es *elastic.Client) {
 		batchData := make([]Order, 0, cfg.Batch)
 		for i := 0; i < cfg.Total; i++ {
 			order := Order{
+				ID:         idCounter,
 				OrderID:    fmt.Sprintf("ORD-%d-%d", time.Now().UnixNano(), i),
 				CustomerID: fmt.Sprintf("CUST-%d", rand.Intn(100000)),
 				Amount:     float64(rand.Int63n(100000*1000000000)) / 1000000000.0, // 随机金额, 9位小数精度
 				CreateTime: time.Now().Format("2006-01-02 15:04:05.000000"),
 			}
+			idCounter++
 			batchData = append(batchData, order)
 			if len(batchData) >= cfg.Batch {
 				// Copy data to avoid race condition on slice reuse
@@ -524,12 +528,12 @@ func writeMySQL(db *sql.DB, orders []Order) {
 	if len(orders) == 0 {
 		return
 	}
-	sqlStr := "INSERT INTO customer_orders (order_id, customer_id, amount, create_time) VALUES "
+	sqlStr := "INSERT INTO customer_orders (id, order_id, customer_id, amount, create_time) VALUES "
 	vals := []interface{}{}
 	placeholders := make([]string, 0, len(orders))
 	for _, o := range orders {
-		placeholders = append(placeholders, "(?, ?, ?, ?)")
-		vals = append(vals, o.OrderID, o.CustomerID, o.Amount, o.CreateTime)
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?)")
+		vals = append(vals, o.ID, o.OrderID, o.CustomerID, o.Amount, o.CreateTime)
 	}
 	sqlStr += strings.Join(placeholders, ",")
 	_, err := db.Exec(sqlStr, vals...)
