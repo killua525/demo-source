@@ -390,10 +390,12 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 			// MySQL DDL: 使用 DECIMAL 保证金额精确, DATETIME(6) 保证微秒精度
 			// 如果非 reload 模式，CREATE TABLE IF NOT EXISTS 不会删除现有数据
 			_, err := db.Exec(`CREATE TABLE IF NOT EXISTS customer_orders (
-				order_id VARCHAR(64) PRIMARY KEY,
-				customer_id VARCHAR(64),
-				amount DECIMAL(19, 9),
-				create_time DATETIME(6),
+			id BIGINT AUTO_INCREMENT UNIQUE,
+			order_id VARCHAR(64) PRIMARY KEY,
+			customer_id VARCHAR(64),
+			amount DECIMAL(19, 9),
+			create_time DATETIME(6),
+			KEY idx_id (id),
 				KEY idx_create_time (create_time),
 				KEY idx_amt (amount)
 			)`)
@@ -422,6 +424,7 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 				},
 				"mappings": {
 					"properties": {
+						"id": { "type": "long" },
 						"order_id": { "type": "keyword" },
 						"customer_id": { "type": "keyword" },
 						"amount": { "type": "scaled_float", "scaling_factor": 1000000000 },
@@ -559,11 +562,11 @@ func benchmarkMySQL(db *sql.DB, limit int) {
 		// 全量：直接用 MySQL SUM 函数，CAST 为 CHAR 保留精度
 		err = db.QueryRow("SELECT CAST(SUM(amount) AS CHAR) FROM customer_orders").Scan(&sumStr)
 	} else {
-		// 部分数据：使用 ORDER BY 和 LIMIT，然后对结果求和
+		// 部分数据：使用 ORDER BY id 和 LIMIT，然后对结果求和
 		// 标准SQL应该使用子查询来确保先排序和限制，再聚合，以保证逻辑正确性
 		err = db.QueryRow(`
 			SELECT CAST(SUM(amount) AS CHAR) FROM
-			(SELECT amount FROM customer_orders ORDER BY create_time ASC LIMIT ?) AS subquery
+			(SELECT amount FROM customer_orders ORDER BY id ASC LIMIT ?) AS subquery
 		`, limit).Scan(&sumStr)
 	}
 
@@ -613,7 +616,7 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 	sr, err := es.Search().
 		Index("customer_orders").
 		Query(elastic.NewMatchAllQuery()).
-		Sort("create_time", true).
+		Sort("id", true).
 		Size(limit).
 		FetchSourceContext(elastic.NewFetchSourceContext(true).Include("amount")).
 		Do(ctx)
@@ -717,7 +720,7 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 			"match_all": map[string]interface{}{},
 		},
 		"sort": []map[string]interface{}{
-			{"create_time": map[string]interface{}{"order": "asc"}},
+			{"id": map[string]interface{}{"order": "asc"}},
 		},
 		"_source": false,
 		"script_fields": map[string]interface{}{
