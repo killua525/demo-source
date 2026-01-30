@@ -58,11 +58,11 @@ type Config struct {
 
 // --- 实体对象 ---
 type Order struct {
-	ID         int64   `json:"id"`
-	OrderID    string  `json:"order_id"`
-	CustomerID string  `json:"customer_id"`
-	Amount     float64 `json:"amount"`
-	CreateTime string  `json:"create_time"`
+	ID         int64  `json:"id"`
+	OrderID    string `json:"order_id"`
+	CustomerID string `json:"customer_id"`
+	Amount     string `json:"amount"` // 使用字符串保证精度一致性
+	CreateTime string `json:"create_time"`
 }
 
 var cfg Config
@@ -428,7 +428,7 @@ func initSchema(db *sql.DB, es *elastic.Client) {
 						"id": { "type": "long" },
 						"order_id": { "type": "keyword" },
 						"customer_id": { "type": "keyword" },
-						"amount": { "type": "scaled_float", "scaling_factor": 1000000000 },
+						"amount": { "type": "keyword" },
 						"create_time": { "type": "date_nanos", "format": "yyyy-MM-dd HH:mm:ss.SSSSSS" }
 					}
 				}
@@ -477,11 +477,14 @@ func loadData(db *sql.DB, es *elastic.Client) {
 		defer close(dataChan)
 		batchData := make([]Order, 0, cfg.Batch)
 		for i := 0; i < cfg.Total; i++ {
+			// 使用big.Rat生成精确的9位小数金额字符串，避免float64精度损失
+			randInt := rand.Int63n(100000 * 1000000000)
+			amount := new(big.Rat).SetFrac64(randInt, 1000000000)
 			order := Order{
 				ID:         idCounter,
 				OrderID:    fmt.Sprintf("ORD-%d-%d", time.Now().UnixNano(), i),
 				CustomerID: fmt.Sprintf("CUST-%d", rand.Intn(100000)),
-				Amount:     float64(rand.Int63n(100000*1000000000)) / 1000000000.0, // 随机金额, 9位小数精度
+				Amount:     amount.FloatString(9), // 直接生成精确的9位小数字符串
 				CreateTime: time.Now().Format("2006-01-02 15:04:05.000000"),
 			}
 			idCounter++
@@ -647,14 +650,15 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 
 	// 使用 BigDecimal 确保精度不丢失（ES7 兼容的 Painless 脚本）
 	// 注意：Elasticsearch 中脚本聚合的正确类型是 scripted_metric
+	// amount 现在是 keyword 类型，直接读取字符串值
 	query := map[string]interface{}{
 		"aggs": map[string]interface{}{
 			"bd_sum": map[string]interface{}{
 				"scripted_metric": map[string]interface{}{
 					// 初始化为 BigDecimal，精度9位小数
 					"init_script": "state.total = new java.math.BigDecimal('0').setScale(9, java.math.RoundingMode.HALF_UP)",
-					// 将每个值转换为 BigDecimal 并累加，保持9位小数精度
-					"map_script": "state.total = state.total.add(new java.math.BigDecimal(String.valueOf(doc['amount'].value)).setScale(9, java.math.RoundingMode.HALF_UP))",
+					// 直接读取keyword字符串值，转换为 BigDecimal 并累加
+					"map_script": "state.total = state.total.add(new java.math.BigDecimal(doc['amount'].value).setScale(9, java.math.RoundingMode.HALF_UP))",
 					// 分片内返回字符串形式的 BigDecimal（保持9位精度）
 					"combine_script": "return state.total.setScale(9, java.math.RoundingMode.HALF_UP).toPlainString();",
 					// 跨分片汇总，接收每个分片的字符串表示并用 BigDecimal 累加，最后用 DecimalFormat 返回字符串（保持9位精度）
@@ -731,7 +735,8 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 		"script_fields": map[string]interface{}{
 			"bd_amount": map[string]interface{}{
 				"script": map[string]interface{}{
-					"source": "return new java.math.BigDecimal(String.valueOf(doc['amount'].value)).toPlainString()",
+					// 直接读取keyword字符串值，不需要再转换
+					"source": "return doc['amount'].value",
 				},
 			},
 		},
