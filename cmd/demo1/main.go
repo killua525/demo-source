@@ -632,14 +632,16 @@ func benchmarkESNativeAgg(es *elastic.Client, limit int) {
 		return
 	}
 
-	var sum float64
+	sum := new(big.Rat).SetInt64(0)
 	for _, hit := range sr.Hits.Hits {
 		var o Order
 		if err := json.Unmarshal(hit.Source, &o); err == nil {
-			sum += o.Amount
+			if rat, ok := new(big.Rat).SetString(o.Amount); ok {
+				sum.Add(sum, rat)
+			}
 		}
 	}
-	fmt.Printf("[ES    ] Scenario=B | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%.9f (Scaled Float, client-side)\n", strconv.Itoa(limit), "RowFetch", time.Since(start), sum)
+	fmt.Printf("[ES    ] Scenario=B | Limit=%-8s | Type=%-11s | Time=%-12s | Sum=%s (keyword, client-side)\n", strconv.Itoa(limit), "RowFetch", time.Since(start), sum.FloatString(9))
 }
 
 // --- 基准测试: ES 脚本聚合 (使用原生 JSON) ---
