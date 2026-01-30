@@ -651,21 +651,22 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 		"aggs": map[string]interface{}{
 			"bd_sum": map[string]interface{}{
 				"scripted_metric": map[string]interface{}{
-					// 初始化为 BigDecimal.ZERO（使用完全限定类名以确保 Painless 能识别）
-					"init_script": "state.total = new java.math.BigDecimal('0')",
-					// 将每个值转换为 BigDecimal 并累加（保证精度）
-					"map_script": "state.total = state.total.add(new java.math.BigDecimal(String.valueOf(doc['amount'].value)))",
-					// 分片内返回字符串形式的 BigDecimal（避免序列化为复杂对象）
+					// 初始化为 BigDecimal，精度9位小数
+					"init_script": "state.total = new java.math.BigDecimal('0').setScale(9, java.math.RoundingMode.HALF_UP)",
+					// 将每个值转换为 BigDecimal 并累加，保持9位小数精度
+					"map_script": "state.total = state.total.add(new java.math.BigDecimal(String.valueOf(doc['amount'].value)).setScale(9, java.math.RoundingMode.HALF_UP))",
+					// 分片内返回字符串形式的 BigDecimal（保持9位精度）
 					"combine_script": "return state.total.setScale(9, java.math.RoundingMode.HALF_UP).toPlainString();",
-					// 跨分片汇总，接收每个分片的字符串表示并用 BigDecimal 累加，最后返回字符串（保持9位精度）
+					// 跨分片汇总，接收每个分片的字符串表示并用 BigDecimal 累加，最后用 DecimalFormat 返回字符串（保持9位精度）
 					"reduce_script": `
-							java.math.BigDecimal sum = new java.math.BigDecimal('0');
+							java.math.BigDecimal sum = new java.math.BigDecimal('0').setScale(9, java.math.RoundingMode.HALF_UP);
 							for (t in states) {
 								if (t != null) {
-									sum = sum.add(new java.math.BigDecimal(String.valueOf(t)));
+									sum = sum.add(new java.math.BigDecimal(String.valueOf(t)).setScale(9, java.math.RoundingMode.HALF_UP));
 								}
 							}
-							return sum.setScale(9, java.math.RoundingMode.HALF_UP).toPlainString();
+							java.text.DecimalFormat df = new java.text.DecimalFormat('0.000000000');
+							return df.format(sum);
 						`,
 				},
 			},
