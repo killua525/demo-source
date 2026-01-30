@@ -291,10 +291,10 @@ func main() {
 			go func(l int) {
 				defer wg.Done()
 				if l == cfg.Total {
-					benchmarkESNativeAgg(esClient, 0)
+					// benchmarkESNativeAgg(esClient, 0) // 暂时注释：amount改为keyword类型后原生聚合不可用
 					benchmarkESScriptAgg(esClient, 0)
 				} else {
-					benchmarkESNativeAgg(esClient, l)
+					// benchmarkESNativeAgg(esClient, l) // 暂时注释：amount改为keyword类型后原生聚合不可用
 					benchmarkESScriptAgg(esClient, l)
 				}
 			}(limit)
