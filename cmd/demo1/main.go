@@ -649,8 +649,8 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 					// 将每个值转换为 BigDecimal 并累加（保证精度）
 					"map_script": "state.total = state.total.add(new java.math.BigDecimal(String.valueOf(doc['amount'].value)))",
 					// 分片内返回字符串形式的 BigDecimal（避免序列化为复杂对象）
-					"combine_script": "return state.total.toPlainString();",
-					// 跨分片汇总，接收每个分片的字符串表示并用 BigDecimal 累加，最后返回字符串
+					"combine_script": "return state.total.setScale(9, java.math.RoundingMode.HALF_UP).toPlainString();",
+					// 跨分片汇总，接收每个分片的字符串表示并用 BigDecimal 累加，最后返回字符串（保持9位精度）
 					"reduce_script": `
 							java.math.BigDecimal sum = new java.math.BigDecimal('0');
 							for (t in states) {
@@ -658,7 +658,7 @@ func benchmarkESScriptAgg(es *elastic.Client, limit int) {
 									sum = sum.add(new java.math.BigDecimal(String.valueOf(t)));
 								}
 							}
-							return sum.toPlainString();
+							return sum.setScale(9, java.math.RoundingMode.HALF_UP).toPlainString();
 						`,
 				},
 			},
