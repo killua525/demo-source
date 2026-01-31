@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -25,6 +26,7 @@ var (
 	batchSize      = 3000           // 批量插入大小 (19列*3000=57000 < 65535限制)
 	concurrency    = 10             // 并发数
 	tablePrefix    = "bench_table_" // 表名前缀
+	forceLoad      = false          // 强制重新导入数据
 )
 
 func init() {
@@ -35,6 +37,7 @@ func init() {
 	flag.IntVar(&smallTableRows, "small-rows", smallTableRows, "小表行数")
 	flag.IntVar(&batchSize, "batch", batchSize, "批量插入大小")
 	flag.IntVar(&concurrency, "concurrency", concurrency, "并发数")
+	flag.BoolVar(&forceLoad, "force", forceLoad, "强制重新导入数据")
 	flag.Parse()
 }
 
@@ -203,6 +206,29 @@ func createTables(db *sql.DB) {
 func loadData(db *sql.DB) {
 	start := time.Now()
 
+	// 检查是否需要跳过数据导入
+	if !forceLoad {
+		skipCount := 0
+		for i := 1; i <= totalTables; i++ {
+			tableName := fmt.Sprintf("%s%03d", tablePrefix, i)
+			isLarge := i <= largeTables
+			expectedRows := smallTableRows
+			if isLarge {
+				expectedRows = largeTableRows
+			}
+			if checkTableData(db, tableName, expectedRows) {
+				skipCount++
+			}
+		}
+		if skipCount == totalTables {
+			fmt.Printf(">>> 所有 %d 张表数据已满足要求，跳过数据导入 (使用 -force 强制重新导入)\n", totalTables)
+			return
+		}
+		if skipCount > 0 {
+			fmt.Printf(">>> %d 张表数据已存在，将跳过\n", skipCount)
+		}
+	}
+
 	// 使用工作池模式并发加载
 	type tableTask struct {
 		tableName string
@@ -212,6 +238,9 @@ func loadData(db *sql.DB) {
 
 	tasks := make(chan tableTask, totalTables)
 	var wg sync.WaitGroup
+	var completedTables int64
+	var completedRows int64
+	var skippedTables int64
 
 	// 启动工作协程
 	for i := 0; i < concurrency; i++ {
@@ -219,10 +248,38 @@ func loadData(db *sql.DB) {
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
+				// 非强制模式下检查是否需要跳过
+				if !forceLoad && checkTableData(db, task.tableName, task.rows) {
+					atomic.AddInt64(&skippedTables, 1)
+					atomic.AddInt64(&completedTables, 1)
+					atomic.AddInt64(&completedRows, int64(task.rows))
+					continue
+				}
 				loadTableData(db, task.tableName, task.rows, task.isLarge)
+				atomic.AddInt64(&completedTables, 1)
+				atomic.AddInt64(&completedRows, int64(task.rows))
 			}
 		}()
 	}
+
+	// 启动进度打印协程
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		totalRows := int64(largeTables*largeTableRows + (totalTables-largeTables)*smallTableRows)
+		for {
+			select {
+			case <-ticker.C:
+				tables := atomic.LoadInt64(&completedTables)
+				rows := atomic.LoadInt64(&completedRows)
+				fmt.Printf(">>> 进度: %d/%d 表, %d/%d 行 (%.1f%%)\n",
+					tables, totalTables, rows, totalRows, float64(rows)/float64(totalRows)*100)
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	// 分发任务
 	for i := 1; i <= totalTables; i++ {
@@ -237,19 +294,19 @@ func loadData(db *sql.DB) {
 	close(tasks)
 
 	wg.Wait()
-	fmt.Printf("\n>>> 数据加载完成，总耗时: %v\n", time.Since(start))
+	close(done)
+
+	totalRows := int64(largeTables*largeTableRows + (totalTables-largeTables)*smallTableRows)
+	fmt.Printf("\n>>> 数据加载完成: %d 表, %d 行, 总耗时: %v\n", totalTables, totalRows, time.Since(start))
 }
 
 // loadTableData 加载单表数据
 func loadTableData(db *sql.DB, tableName string, totalRows int, isLarge bool) {
 	start := time.Now()
-	tableType := "小表"
-	if isLarge {
-		tableType = "大表"
-	}
-	fmt.Printf(">>> [%s] 开始加载 %s 数据 (%d 行)...\n", tableType, tableName, totalRows)
-
 	loaded := 0
+	lastPrint := time.Now()
+	printedStart := false
+
 	for loaded < totalRows {
 		batchRows := batchSize
 		if loaded+batchRows > totalRows {
@@ -259,14 +316,25 @@ func loadTableData(db *sql.DB, tableName string, totalRows int, isLarge bool) {
 		insertBatch(db, tableName, batchRows, loaded, isLarge)
 		loaded += batchRows
 
-		// 大表每100万行打印一次进度
-		if isLarge && loaded%(1000000) == 0 {
-			fmt.Printf(">>> [大表] %s 已加载 %d/%d 行 (%.1f%%)\n",
-				tableName, loaded, totalRows, float64(loaded)/float64(totalRows)*100)
+		// 大表加载超过1分钟时显示进度
+		if isLarge && time.Since(start) > time.Minute {
+			if !printedStart {
+				fmt.Printf(">>> [大表] %s 加载中...\n", tableName)
+				printedStart = true
+			}
+			// 每30秒打印一次进度
+			if time.Since(lastPrint) > 30*time.Second {
+				fmt.Printf(">>> [大表] %s 进度: %d/%d 行 (%.1f%%)\n",
+					tableName, loaded, totalRows, float64(loaded)/float64(totalRows)*100)
+				lastPrint = time.Now()
+			}
 		}
 	}
 
-	fmt.Printf(">>> [%s] %s 加载完成，行数: %d，耗时: %v\n", tableType, tableName, totalRows, time.Since(start))
+	// 大表加载完成时打印耗时
+	if isLarge && time.Since(start) > time.Minute {
+		fmt.Printf(">>> [大表] %s 加载完成，耗时: %v\n", tableName, time.Since(start))
+	}
 }
 
 // insertBatch 批量插入数据
@@ -434,4 +502,14 @@ func randomString(length int) string {
 		b[i] = charset[rand.Intn(len(charset))]
 	}
 	return string(b)
+}
+
+// checkTableData 检查表数据是否满足要求
+func checkTableData(db *sql.DB, tableName string, expectedRows int) bool {
+	var count int
+	err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count >= expectedRows
 }
