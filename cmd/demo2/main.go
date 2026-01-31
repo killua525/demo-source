@@ -18,15 +18,16 @@ import (
 
 // 配置
 var (
-	mysqlDSN       = "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
-	totalTables    = 200
-	largeTables    = 3              // 大表数量
-	largeTableRows = 5000000        // 大表行数 500w
-	smallTableRows = 50000          // 小表行数 5w
-	batchSize      = 3000           // 批量插入大小 (19列*3000=57000 < 65535限制)
-	concurrency    = 10             // 并发数
-	tablePrefix    = "bench_table_" // 表名前缀
-	forceLoad      = false          // 强制重新导入数据
+	mysqlDSN        = "root:123456@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True"
+	totalTables     = 200
+	largeTables     = 3              // 大表数量
+	largeTableRows  = 5000000        // 大表行数 500w
+	smallTableRows  = 50000          // 小表行数 5w
+	batchSize       = 3000           // 批量插入大小 (19列*3000=57000 < 65535限制)
+	concurrency     = 10             // 并发数
+	tablePrefix     = "bench_table_" // 表名前缀
+	forceLoad       = false          // 强制重新导入数据
+	largeTableIndex = false          // 大表是否创建pkb唯一索引
 )
 
 func init() {
@@ -38,6 +39,7 @@ func init() {
 	flag.IntVar(&batchSize, "batch", batchSize, "批量插入大小")
 	flag.IntVar(&concurrency, "concurrency", concurrency, "并发数")
 	flag.BoolVar(&forceLoad, "force", forceLoad, "强制重新导入数据")
+	flag.BoolVar(&largeTableIndex, "large-index", largeTableIndex, "大表是否创建pkb唯一索引")
 	flag.Parse()
 }
 
@@ -146,7 +148,11 @@ func createTables(db *sql.DB) {
 
 		var createTableSQL string
 		if isLarge {
-			// 大表：无主键，有pkb唯一索引
+			// 大表：无主键，根据参数决定是否创建pkb唯一索引
+			indexSQL := ""
+			if largeTableIndex {
+				indexSQL = ",\n\t\t\t\t\tUNIQUE KEY idx_pkb (pkb)"
+			}
 			createTableSQL = fmt.Sprintf(`
 				CREATE TABLE IF NOT EXISTS %s (
 					pkb BIGINT NOT NULL,
@@ -168,10 +174,9 @@ func createTables(db *sql.DB) {
 					col_text_1 TEXT,
 					col_tinyint_1 TINYINT,
 					col_smallint_1 SMALLINT,
-					col_timestamp_1 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-					UNIQUE KEY idx_pkb (pkb)
+					col_timestamp_1 TIMESTAMP DEFAULT CURRENT_TIMESTAMP%s
 				) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-			`, tableName)
+			`, tableName, indexSQL)
 		} else {
 			// 小表：无主键、无索引，有唯一数据列pkb
 			createTableSQL = fmt.Sprintf(`
