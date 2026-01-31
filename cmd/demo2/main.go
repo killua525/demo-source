@@ -146,7 +146,7 @@ func createTables(db *sql.DB) {
 
 		var createTableSQL string
 		if isLarge {
-			// 大表：无主键、无索引，有唯一数据列pkb
+			// 大表：无主键，有pkb唯一索引
 			createTableSQL = fmt.Sprintf(`
 				CREATE TABLE IF NOT EXISTS %s (
 					pkb BIGINT NOT NULL,
@@ -168,7 +168,8 @@ func createTables(db *sql.DB) {
 					col_text_1 TEXT,
 					col_tinyint_1 TINYINT,
 					col_smallint_1 SMALLINT,
-					col_timestamp_1 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+					col_timestamp_1 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					UNIQUE KEY idx_pkb (pkb)
 				) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 			`, tableName)
 		} else {
@@ -324,12 +325,34 @@ func loadData(db *sql.DB) {
 // loadTableData 加载单表数据
 func loadTableData(db *sql.DB, tableName string, totalRows int, isLarge bool) {
 	start := time.Now()
+
+	// 大表优化：设置会话参数加速插入
+	if isLarge {
+		db.Exec("SET unique_checks=0")
+		db.Exec("SET foreign_key_checks=0")
+		db.Exec("SET sql_log_bin=0")
+		defer func() {
+			db.Exec("SET unique_checks=1")
+			db.Exec("SET foreign_key_checks=1")
+			db.Exec("SET sql_log_bin=1")
+		}()
+	}
+
 	loaded := 0
 	lastPrint := time.Now()
 	printedStart := false
 
+	// 大表使用更大的 batch
+	currentBatchSize := batchSize
+	if isLarge {
+		currentBatchSize = batchSize * 2 // 大表使用双倍 batch
+		if currentBatchSize*19 > 65000 {
+			currentBatchSize = 65000 / 19 // 确保不超过 placeholder 限制
+		}
+	}
+
 	for loaded < totalRows {
-		batchRows := batchSize
+		batchRows := currentBatchSize
 		if loaded+batchRows > totalRows {
 			batchRows = totalRows - loaded
 		}
