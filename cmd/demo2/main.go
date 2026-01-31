@@ -22,7 +22,7 @@ var (
 	largeTables    = 3              // 大表数量
 	largeTableRows = 5000000        // 大表行数 500w
 	smallTableRows = 50000          // 小表行数 5w
-	batchSize      = 5000           // 批量插入大小
+	batchSize      = 3000           // 批量插入大小 (19列*3000=57000 < 65535限制)
 	concurrency    = 10             // 并发数
 	tablePrefix    = "bench_table_" // 表名前缀
 )
