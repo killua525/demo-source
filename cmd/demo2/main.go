@@ -94,7 +94,7 @@ func main() {
 	fmt.Println("\n========================================")
 	fmt.Println("数据预置完成！")
 	fmt.Println("输入 'continue' 或 'c' 继续执行DDL操作")
-	fmt.Println("  - 大表: 将pkb列设置为主键")
+	fmt.Println("  - 大表: 添加列t -> 更新t=pkb+1 -> 设置t为主键")
 	fmt.Println("  - 小表: 将pkb列设置为主键")
 	fmt.Println("输入 'exit' 或 'q' 退出程序")
 	fmt.Println("========================================")
@@ -127,9 +127,22 @@ func createTables(db *sql.DB) {
 	fmt.Printf(">>> 开始创建 %d 张表...\n", totalTables)
 	start := time.Now()
 
+	createdCount := 0
+	skippedCount := 0
+
 	for i := 1; i <= totalTables; i++ {
 		tableName := fmt.Sprintf("%s%03d", tablePrefix, i)
 		isLarge := i <= largeTables
+		expectedRows := smallTableRows
+		if isLarge {
+			expectedRows = largeTableRows
+		}
+
+		// 非强制模式下，检查表是否存在且数据满足要求
+		if !forceLoad && checkTableData(db, tableName, expectedRows) {
+			skippedCount++
+			continue
+		}
 
 		var createTableSQL string
 		if isLarge {
@@ -186,20 +199,28 @@ func createTables(db *sql.DB) {
 			`, tableName)
 		}
 
-		// 先删除旧表
+		// 删除旧表
 		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
 
 		_, err := db.Exec(createTableSQL)
 		if err != nil {
 			log.Printf("创建表 %s 失败: %v", tableName, err)
 		}
+		createdCount++
 
-		if i%50 == 0 {
-			fmt.Printf(">>> 已创建 %d/%d 张表\n", i, totalTables)
+		if createdCount%50 == 0 {
+			fmt.Printf(">>> 已创建 %d 张表\n", createdCount)
 		}
 	}
 
-	fmt.Printf(">>> 表结构创建完成，耗时: %v\n", time.Since(start))
+	if skippedCount > 0 {
+		fmt.Printf(">>> 跳过 %d 张表（数据已存在）\n", skippedCount)
+	}
+	if createdCount > 0 {
+		fmt.Printf(">>> 创建 %d 张表完成，耗时: %v\n", createdCount, time.Since(start))
+	} else {
+		fmt.Printf(">>> 所有表已存在，跳过创建 (使用 -force 强制重建)\n")
+	}
 }
 
 // loadData 加载数据
@@ -444,21 +465,41 @@ func insertBatch(db *sql.DB, tableName string, rows int, offset int, isLarge boo
 
 // executeDDLOperations 执行DDL操作
 func executeDDLOperations(db *sql.DB) {
-	// 对大表执行DDL操作（添加主键）
+	// 对大表执行DDL操作（添加新列 -> 更新 -> 设置主键）
 	fmt.Println("\n========== 大表DDL操作 ==========")
 	for i := 1; i <= largeTables; i++ {
 		tableName := fmt.Sprintf("%s%03d", tablePrefix, i)
 		fmt.Printf("\n>>> 开始处理大表 %s 的DDL操作...\n", tableName)
 
-		// 大表只需要对pkb列添加主键
-		fmt.Printf("  添加主键 (pkb)...\n")
-		alterPKStart := time.Now()
-		_, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (pkb)", tableName))
+		// Step 1: 添加新列 t
+		fmt.Printf("  [1/3] 添加列 t...\n")
+		alterAddStart := time.Now()
+		_, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN t BIGINT", tableName))
 		if err != nil {
-			log.Printf("  添加主键失败: %v", err)
+			log.Printf("  添加列失败: %v", err)
 			continue
 		}
-		fmt.Printf("  添加主键完成，耗时: %v\n", time.Since(alterPKStart))
+		fmt.Printf("  [1/3] 添加列完成，耗时: %v\n", time.Since(alterAddStart))
+
+		// Step 2: 更新数据 t = pkb + 1
+		fmt.Printf("  [2/3] 更新列数据 (t = pkb + 1)...\n")
+		updateStart := time.Now()
+		_, err = db.Exec(fmt.Sprintf("UPDATE %s SET t = pkb + 1", tableName))
+		if err != nil {
+			log.Printf("  更新数据失败: %v", err)
+			continue
+		}
+		fmt.Printf("  [2/3] 更新数据完成，耗时: %v\n", time.Since(updateStart))
+
+		// Step 3: 将 t 设置为主键
+		fmt.Printf("  [3/3] 设置主键 (t)...\n")
+		alterPKStart := time.Now()
+		_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (t)", tableName))
+		if err != nil {
+			log.Printf("  设置主键失败: %v", err)
+			continue
+		}
+		fmt.Printf("  [3/3] 设置主键完成，耗时: %v\n", time.Since(alterPKStart))
 
 		fmt.Printf(">>> 大表 %s DDL操作完成\n", tableName)
 	}
